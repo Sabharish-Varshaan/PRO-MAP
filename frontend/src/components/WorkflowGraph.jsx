@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import ReactFlow, { Background, Controls, MiniMap } from 'react-flow-renderer'
 import CustomNode from './CustomNode'
 
@@ -7,11 +7,14 @@ const NODE_TYPES = { task: CustomNode }
 const EDGE_STYLE = {
   type: 'smoothstep',
   animated: true,
-  style: { stroke: '#2563eb', strokeWidth: 2 },
-  markerEnd: { type: 'arrowclosed', color: '#2563eb' },
+  style: { stroke: '#94a3b8', strokeWidth: 2 },
+  markerEnd: { type: 'arrowclosed', color: '#94a3b8' },
 }
 
-export default function WorkflowGraph({ nodes, edges, onNodeClick }) {
+export default function WorkflowGraph({ nodes, edges, insights, onNodeClick }) {
+  const [flowInstance, setFlowInstance] = useState(null)
+  const criticalNodeSet = useMemo(() => new Set(insights?.critical_path || []), [insights])
+
   const safeNodes = useMemo(() => {
     if (!Array.isArray(nodes)) return []
 
@@ -33,6 +36,7 @@ export default function WorkflowGraph({ nodes, edges, onNodeClick }) {
       .map((e, i) => {
         const source = String(e.source)
         const target = String(e.target)
+        const isCriticalEdge = criticalNodeSet.has(source) && criticalNodeSet.has(target)
 
         return {
           ...EDGE_STYLE,
@@ -40,10 +44,27 @@ export default function WorkflowGraph({ nodes, edges, onNodeClick }) {
           id: String(e.id || `e-${source}-${target}-${i}`),
           source,
           target,
+          style: isCriticalEdge
+            ? { stroke: '#ef4444', strokeWidth: 3 }
+            : (e.style || EDGE_STYLE.style),
+          markerEnd: isCriticalEdge
+            ? { type: 'arrowclosed', color: '#ef4444' }
+            : (e.markerEnd || EDGE_STYLE.markerEnd),
         }
       })
       .filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target))
-  }, [edges, safeNodes])
+  }, [edges, safeNodes, criticalNodeSet])
+
+  useEffect(() => {
+    if (!flowInstance || safeNodes.length === 0) return
+    const timer = setTimeout(() => {
+      flowInstance.fitView({ padding: 0.2, duration: 350, includeHiddenNodes: true })
+      requestAnimationFrame(() => {
+        flowInstance.fitView({ padding: 0.2, duration: 200, includeHiddenNodes: true })
+      })
+    }, 150)
+    return () => clearTimeout(timer)
+  }, [flowInstance, safeNodes, safeEdges])
 
   return (
     <div className="canvas-flow-wrap">
@@ -53,19 +74,32 @@ export default function WorkflowGraph({ nodes, edges, onNodeClick }) {
         nodeTypes={NODE_TYPES}
         fitView
         fitViewOptions={{ padding: 0.2 }}
-        minZoom={0.25}
+        style={{ height: '100%', width: '100%' }}
+        defaultZoom={1}
+        minZoom={0.5}
         maxZoom={2}
+        panOnScroll
+        panOnDrag
+        panOnScrollSpeed={0.8}
+        zoomOnScroll={false}
+        zoomOnPinch
+        zoomOnDoubleClick={false}
         proOptions={{ hideAttribution: true }}
-        onNodeClick={onNodeClick}
+        onInit={setFlowInstance}
+        onNodeClick={(event, node) => {
+          if (typeof onNodeClick === 'function') {
+            onNodeClick(event, node)
+          }
+        }}
       >
         <Background gap={24} size={1} color="#d5d3cc" />
-        <Controls showInteractive={false} />
+        <Controls />
         <MiniMap
           nodeColor={(n) => {
             const p = n.data?.priority
-            if (p === 'High') return '#fecaca'
-            if (p === 'Low') return '#a7f3d0'
-            return '#fde68a'
+            if (p === 'High') return '#f59e0b'
+            if (p === 'Low') return '#64748b'
+            return '#3b82f6'
           }}
           maskColor="rgba(245,244,240,.75)"
           style={{

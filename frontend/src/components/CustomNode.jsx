@@ -5,29 +5,32 @@ export default function CustomNode({ data, selected }) {
   const features = Array.isArray(data?.features) ? data.features.slice(0, 2) : []
   const modules  = Array.isArray(data?.modules)  ? data.modules.slice(0, 2)  : []
 
-  function handleNodeClick(e) {
-    e.stopPropagation()
-    if (typeof data?.onClick === 'function') {
-      data.onClick(e)
-    }
-  }
-
   return (
-    <div className={`task-node${selected ? ' selected' : ''}`}
-    onClick={handleNodeClick}>
+    <div className={`task-node${selected ? ' selected' : ''}`}>
       <div className={`task-node__bar task-node__bar--${priority}`} />
 
       <Handle type="target" position={Position.Top} className="task-node__handle" />
 
-      <p className="task-node__title">{data?.label}</p>
+      <h3 className="task-node__title">{data?.label}</h3>
+
+      {(data?.is_critical || data?.is_bottleneck) && (
+        <div className="task-node__flags">
+          {data?.is_critical && (
+            <span className="task-node__flag task-node__flag--critical">Critical</span>
+          )}
+          {data?.is_bottleneck && (
+            <span className="task-node__flag task-node__flag--bottleneck">Bottleneck</span>
+          )}
+        </div>
+      )}
 
       {data?.description ? (
         <p className="task-node__desc">{data.description}</p>
       ) : null}
 
       {features.length > 0 && (
-        <div style={{ marginBottom: 4 }}>
-          <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--text-3)', marginBottom: 4 }}>Features</div>
+        <div className="task-node__meta-block">
+          <div className="task-node__meta-label">Features</div>
           <div className="task-node__chips">
             {features.map((f) => <span key={f} className="task-node__chip">{f}</span>)}
           </div>
@@ -35,8 +38,8 @@ export default function CustomNode({ data, selected }) {
       )}
 
       {modules.length > 0 && (
-        <div style={{ marginBottom: 4 }}>
-          <div style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--text-3)', marginBottom: 4 }}>Modules</div>
+        <div className="task-node__meta-block">
+          <div className="task-node__meta-label">Modules</div>
           <div className="task-node__chips">
             {modules.map((m) => <span key={m} className="task-node__chip task-node__chip--mod">{m}</span>)}
           </div>

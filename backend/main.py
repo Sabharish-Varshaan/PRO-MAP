@@ -3,6 +3,7 @@ import os
 import re
 import time
 
+import networkx as nx
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,7 +31,7 @@ class GenerateRequest(BaseModel):
     project_description: str
 
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "").strip())
 
 
 def _extract_json_content(content: str) -> str:
@@ -48,6 +49,59 @@ def clean_text(text: str) -> str:
     return text.replace("```json", "").replace("```", "")
 
 
+def _find_json_object(text: str) -> str:
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    brace_count = 0
+    in_string = False
+    escape = False
+
+    for index, char in enumerate(text[start:], start):
+        if char == '"' and not escape:
+            in_string = not in_string
+        if char == '\\' and not escape:
+            escape = True
+            continue
+        if escape:
+            escape = False
+        if not in_string:
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    return text[start:index + 1]
+    return None
+
+
+def _normalize_json_string(json_text: str) -> str:
+    normalized_chars = []
+    in_string = False
+    escape = False
+
+    for char in json_text:
+        if char == '"' and not escape:
+            in_string = not in_string
+            normalized_chars.append(char)
+            continue
+        if char == '\\' and not escape:
+            escape = True
+            normalized_chars.append(char)
+            continue
+        if escape:
+            escape = False
+            normalized_chars.append(char)
+            continue
+        if in_string and char in {'\n', '\r'}:
+            normalized_chars.append(' ')
+        else:
+            normalized_chars.append(char)
+
+    return ''.join(normalized_chars)
+
+
 def _is_placeholder_label(label: str) -> bool:
     normalized = label.strip().lower()
     return normalized in {"", "task", "task 1", "step", "step 1", "node", "node 1"} or bool(
@@ -55,18 +109,53 @@ def _is_placeholder_label(label: str) -> bool:
     )
 
 
+def _attempt_recover_json(json_text: str) -> str:
+    json_text = _normalize_json_string(json_text)
+
+    if json_text.count('"') % 2 != 0:
+        json_text += '"'
+
+    open_braces = json_text.count('{') - json_text.count('}')
+    open_brackets = json_text.count('[') - json_text.count(']')
+    if open_braces > 0:
+        json_text += '}' * open_braces
+    if open_brackets > 0:
+        json_text += ']' * open_brackets
+
+    try:
+        json.loads(json_text)
+        return json_text
+    except Exception:
+        pass
+
+    trimmed = json_text
+    while trimmed and trimmed[-1] not in '}]':
+        trimmed = trimmed[:-1]
+    if trimmed and trimmed[-1] == ',':
+        trimmed = trimmed[:-1]
+
+    try:
+        json.loads(trimmed)
+        return trimmed
+    except Exception:
+        return None
+
+
 def extract_json(text: str) -> dict:
     try:
-        import json
-        import re
+        json_text = clean_text(text)
+        json_text = _find_json_object(json_text)
+        if not json_text:
+            raise ValueError("No JSON object found")
 
-        text = text.replace("```json", "").replace("```", "")
-
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        json_text = match.group()
-        json_text = json_text.rstrip(", \n")
-
-        return json.loads(json_text)
+        json_text = _normalize_json_string(json_text)
+        try:
+            return json.loads(json_text)
+        except Exception:
+            recovered = _attempt_recover_json(json_text)
+            if recovered:
+                return json.loads(recovered)
+            raise
     except Exception as e:
         print("JSON ERROR:", e)
         return None
@@ -121,7 +210,6 @@ def _has_valid_workflow_shape(workflow: dict) -> bool:
         isinstance(workflow, dict)
         and isinstance(workflow.get("nodes"), list)
         and isinstance(workflow.get("edges"), list)
-        and isinstance(workflow.get("order"), list)
     )
 
 
@@ -129,15 +217,12 @@ def _is_valid_workflow_shape(workflow: dict) -> bool:
     if not isinstance(workflow, dict):
         return False
 
-    required_keys = ("nodes", "edges", "order")
-    if not all(key in workflow for key in required_keys):
+    if "nodes" not in workflow or "edges" not in workflow:
         return False
 
     if not isinstance(workflow["nodes"], list):
         return False
     if not isinstance(workflow["edges"], list):
-        return False
-    if not isinstance(workflow["order"], list):
         return False
 
     return True
@@ -146,7 +231,7 @@ def _is_valid_workflow_shape(workflow: dict) -> bool:
 def _normalize_workflow_shape(workflow: dict) -> dict:
     normalized_nodes = []
     node_id_map = {}
-    raw_nodes = workflow.get("nodes", [])[:6]
+    raw_nodes = workflow.get("nodes", [])[:8]
 
     for index, node in enumerate(raw_nodes, start=1):
         if not isinstance(node, dict):
@@ -276,6 +361,136 @@ def _normalize_workflow_shape(workflow: dict) -> dict:
     return normalized
 
 
+def _analyze_workflow_graph(workflow: dict) -> dict:
+    if not isinstance(workflow, dict):
+        return workflow
+
+    graph = nx.DiGraph()
+    graph.add_nodes_from(
+        str(node.get("id"))
+        for node in workflow.get("nodes", [])
+        if isinstance(node, dict) and node.get("id")
+    )
+
+    for edge in workflow.get("edges", []):
+        if not isinstance(edge, dict):
+            continue
+        source = edge.get("source") or edge.get("from")
+        target = edge.get("target") or edge.get("to")
+        if not source or not target:
+            continue
+        graph.add_edge(str(source), str(target))
+
+    if not nx.is_directed_acyclic_graph(graph):
+        raise ValueError("Workflow graph is not a DAG")
+
+    workflow["order"] = list(nx.topological_sort(graph))
+
+    levels = {}
+    for node in workflow["order"]:
+        preds = list(graph.predecessors(node))
+        if preds:
+            level = max(levels[p] for p in preds) + 1
+        else:
+            level = 0
+        levels[node] = level
+
+    parallel_groups = {}
+    for node, lvl in levels.items():
+        parallel_groups.setdefault(lvl, []).append(node)
+
+    workflow["parallel_groups"] = [parallel_groups[lvl] for lvl in sorted(parallel_groups)]
+    workflow["critical_path"] = nx.dag_longest_path(graph)
+    workflow["bottlenecks"] = [
+        node for node in graph.nodes() if graph.in_degree(node) + graph.out_degree(node) >= 2
+    ]
+
+    critical_set = set(str(node_id) for node_id in workflow["critical_path"])
+    bottleneck_set = set(str(node_id) for node_id in workflow["bottlenecks"])
+
+    for node in workflow.get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id"))
+        data = node.get("data")
+        if not isinstance(data, dict):
+            data = {}
+            node["data"] = data
+
+        data["is_critical"] = node_id in critical_set
+        data["is_bottleneck"] = node_id in bottleneck_set
+
+        degree = graph.in_degree(node_id) + graph.out_degree(node_id)
+        if degree >= 3:
+            difficulty = "Hard"
+        elif degree >= 2:
+            difficulty = "Medium"
+        else:
+            difficulty = "Easy"
+        data["difficulty"] = difficulty
+
+    workflow["confidence"] = compute_confidence(workflow, graph)
+
+    return workflow
+
+
+def generate_explanation(data: dict) -> str:
+    num_tasks = len(data.get("nodes", []))
+    critical_path = data.get("critical_path", [])
+    parallel_groups = data.get("parallel_groups", [])
+    bottlenecks = data.get("bottlenecks", [])
+
+    explanation = f"This workflow contains {num_tasks} tasks."
+    if critical_path:
+        explanation += " The critical path defines the main execution flow."
+    if len(parallel_groups) > 1:
+        explanation += " Some tasks can be executed in parallel to optimize time."
+    if bottlenecks:
+        explanation += " Bottlenecks represent tasks with high dependencies."
+
+    return explanation
+
+
+def compute_confidence(data: dict, graph) -> float:
+    score = 0.5
+
+    if nx.is_directed_acyclic_graph(graph):
+        score += 0.2
+
+    critical_path = data.get("critical_path", [])
+    if len(critical_path) > 2:
+        score += 0.1
+
+    parallel_groups = data.get("parallel_groups", [])
+    if len(parallel_groups) > 1:
+        score += 0.1
+
+    bottlenecks = data.get("bottlenecks", [])
+    if bottlenecks:
+        score += 0.1
+
+    return min(score, 1.0)
+
+
+def validate_output(data: dict) -> dict:
+    required_fields = {
+        "nodes": [],
+        "edges": [],
+        "order": [],
+        "parallel_groups": [],
+        "critical_path": [],
+        "bottlenecks": [],
+        "confidence": 0.0,
+        "explanation": "Workflow generated successfully"
+    }
+
+    for field, default in required_fields.items():
+        if field not in data:
+            data[field] = default
+
+    return data
+
+
 def _add_insights(workflow: dict) -> dict:
     nodes_by_id = {node["id"]: node for node in workflow.get("nodes", [])}
     order = workflow.get("order", [])
@@ -296,7 +511,7 @@ def _add_insights(workflow: dict) -> dict:
         "end": end_node["data"]["label"] if end_node else "",
         "bottleneck": bottleneck_node["data"]["label"] if bottleneck_node else "",
     }
-    workflow["explanation"] = workflow.get("explanation") or "This workflow follows standard development steps."
+    workflow["explanation"] = generate_explanation(workflow)
 
     return workflow
 
@@ -320,7 +535,8 @@ def _move_ui_task_earlier(workflow: dict) -> dict:
 
 
 def generate_with_gpt(idea: str) -> dict:
-    prompt = f"""
+    try:
+        prompt = f"""
 You are a senior software architect.
 
 Convert this idea into a DETAILED development workflow.
@@ -348,7 +564,11 @@ Edges MUST be in this format:
 DO NOT use "from" or "to"
 
 STRICT RULES:
-- 5-6 tasks only
+- 6-8 tasks only
+- Clear dependencies
+- Avoid redundant steps
+- Do not use multiline strings in any value
+- Do not include newline characters inside JSON string values
 - Features must be REAL (not generic)
 - Modules must be technical (API, DB, UI components, etc.)
 - Avoid vague words like 'system' or 'logic'
@@ -372,41 +592,51 @@ Example node:
 Idea: {idea}
 """
 
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a senior software architect. Output structured, logical workflows only.",
-        },
-        {"role": "user", "content": prompt},
-    ]
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a senior software architect. Output structured, logical workflows only.",
+            },
+            {"role": "user", "content": prompt},
+        ]
 
-    start_time = time.time()
+        start_time = time.time()
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        temperature=0.2,
-        max_tokens=1000,
-    )
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.2,
+            max_tokens=1400,
+        )
 
-    content = response.choices[0].message.content or ""
-    print("RAW GPT:", content)
-    content = clean_text(content)
-    parsed = extract_json(content)
-    if not parsed:
-        raise ValueError("Invalid JSON")
-    if not _has_valid_workflow_shape(parsed):
-        raise ValueError("Invalid workflow JSON shape from GPT")
+        content = response.choices[0].message.content or ""
+        print("RAW GPT:", content)
+        content = clean_text(content)
+        parsed = extract_json(content)
+        if not parsed:
+            raise ValueError("Invalid JSON")
+        if not _has_valid_workflow_shape(parsed):
+            raise ValueError("Invalid workflow JSON shape from GPT")
 
-    parsed = fix_nodes(parsed)
-    parsed = fix_edges(parsed)
-    parsed = normalize_edges(parsed)
+        # Allow generating an order from nodes/edges if GPT omits it
+        if "order" not in parsed or not isinstance(parsed.get("order"), list):
+            parsed["order"] = []
 
-    normalized = _normalize_workflow_shape(parsed)
-    normalized = _move_ui_task_earlier(normalized)
-    print(f"Response time: {time.time() - start_time:.3f}s")
+        parsed = fix_nodes(parsed)
+        parsed = fix_edges(parsed)
+        parsed = normalize_edges(parsed)
 
-    return _add_insights(normalized)
+        normalized = _normalize_workflow_shape(parsed)
+        normalized = _move_ui_task_earlier(normalized)
+        normalized = _analyze_workflow_graph(normalized)
+        print(f"Response time: {time.time() - start_time:.3f}s")
+
+        return validate_output(_add_insights(normalized))
+    except Exception as e:
+        fallback = dict(MOCK_JSON)
+        fallback["error"] = "Workflow generation failed"
+        fallback["fallback"] = True
+        return validate_output(fallback)
 
 
 @app.get("/health")
@@ -416,20 +646,5 @@ def health_check() -> dict:
 
 @app.post("/generate")
 def generate(data: GenerateRequest) -> dict:
-    try:
-        result = generate_with_gpt(data.project_description)
-        if not result or "order" not in result or len(result["order"]) < 2:
-            return MOCK_JSON
-        if not result.get("nodes") or not result.get("edges"):
-            return MOCK_JSON
-        return result
-    except Exception:
-        fallback = dict(MOCK_JSON)
-        fallback["explanation"] = "Fallback workflow used due to AI failure."
-        if "explanation" not in fallback:
-            fallback["explanation"] = "This workflow follows standard development steps."
-        result = _add_insights(_normalize_workflow_shape(fallback))
-        if not result or "order" not in result or len(result["order"]) < 2:
-            return MOCK_JSON
-
-        return result
+    result = generate_with_gpt(data.project_description)
+    return result

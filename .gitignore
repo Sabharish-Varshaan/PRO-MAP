@@ -11,3 +11,8 @@ dist/
 
 # OS
 .DS_Store
+
+# SQLite
+*.db
+*.sqlite
+*.sqlite3

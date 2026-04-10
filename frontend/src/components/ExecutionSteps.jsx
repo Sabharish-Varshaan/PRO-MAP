@@ -2,8 +2,8 @@ function ExecutionSteps({ order, nodeLabelMap }) {
   return (
     <section className="card steps-card">
       <div className="steps-card__header">
-        <h2>Execution Plan</h2>
-        <p>Suggested order to execute your workflow tasks.</p>
+        <h2>🔄 Execution Order</h2>
+        <p>Step-by-step sequence for completing the workflow.</p>
       </div>
 
       {order.length > 0 ? (
@@ -11,7 +11,9 @@ function ExecutionSteps({ order, nodeLabelMap }) {
           {order.map((nodeId, index) => (
             <li key={`${nodeId}-${index}`} className="steps-list__item">
               <span className="steps-list__index">{index + 1}</span>
-              <span className="steps-list__label">{nodeLabelMap[nodeId] || nodeId}</span>
+              <span className="steps-list__label">
+                Step {index + 1}: {nodeLabelMap[nodeId] || nodeId}
+              </span>
             </li>
           ))}
         </ol>

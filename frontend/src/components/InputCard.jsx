@@ -31,6 +31,10 @@ function InputCard({ projectIdea, isLoading, onProjectIdeaChange, onGenerate }) 
           )}
         </button>
       </div>
+
+      <p className="input-card__note">
+        AI converts your idea into tasks, dependencies, and execution plan.
+      </p>
     </section>
   )
 }

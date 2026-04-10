@@ -1,14 +1,17 @@
-* {
-  box-sizing: border-box;
-}
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Sora:wght@600;700;800&display=swap');
+*, *::before, *::after { box-sizing: border-box; }
 
 body {
   margin: 0;
-  font-family: "Inter", "SF Pro Text", "Segoe UI", sans-serif;
-  background: #f9fafb;
-  color: #111827;
+  font-family: 'DM Sans', 'Segoe UI', sans-serif;
+  background: #f5f4f0;
+  color: #1a1a2e;
+  -webkit-font-smoothing: antialiased;
+  font-size: 14px;
 }
 
-#root {
-  min-height: 100vh;
-}
+#root { min-height: 100vh; }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d1d0cb; border-radius: 99px; }

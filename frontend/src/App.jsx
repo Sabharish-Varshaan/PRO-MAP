@@ -1,477 +1,828 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
-import fallbackWorkflow from './sample_workflow.json'
 import 'react-flow-renderer/dist/style.css'
 import './App.css'
-import Header from './components/Header'
-import InputCard from './components/InputCard'
 import WorkflowGraph from './components/WorkflowGraph'
-import ExecutionSteps from './components/ExecutionSteps'
 import { getLayoutedNodes } from './utils/layout'
 
-const envApiBaseUrl = import.meta.env.VITE_API_BASE_URL
-const apiBaseUrls = [envApiBaseUrl, 'http://127.0.0.1:8000', 'http://127.0.0.1:8001'].filter(
-  (url, index, arr) => Boolean(url) && arr.indexOf(url) === index,
-)
+/* ── API ─────────────────────────────────────────────── */
+const API_BASE_URL = 'http://127.0.0.1:8001'
+const API_TIMEOUT_MS = 90000
+const DEBUG_LOGS = true
 
-function normalizeWorkflow(workflowData) {
-  const rawNodes = Array.isArray(workflowData?.nodes) ? workflowData.nodes : []
-  const rawEdges = Array.isArray(workflowData?.edges) ? workflowData.edges : []
-  const rawOrder = Array.isArray(workflowData?.order) ? workflowData.order : []
-  const explanation = workflowData?.explanation?.trim() || 'This workflow follows standard development steps.'
+/* ── Normalize backend response ──────────────────────── */
+function normalizeWorkflow(raw) {
+  const payload = (raw && typeof raw === 'object') ? (raw.workflow && typeof raw.workflow === 'object' ? raw.workflow : raw) : {}
+  const rawNodes = Array.isArray(payload?.nodes) ? payload.nodes : []
+  const rawEdges = Array.isArray(payload?.edges) ? payload.edges : []
+  const rawOrder = Array.isArray(payload?.order) ? payload.order : []
 
-  const isPlaceholderLabel = (label) => {
-    const normalized = String(label || '').trim().toLowerCase()
-    return (
-      normalized === '' ||
-      normalized === 'task' ||
-      normalized === 'task 1' ||
-      normalized === 'step' ||
-      normalized === 'step 1' ||
-      normalized === 'node' ||
-      normalized === 'node 1' ||
-      /^((task|step|node|n)\s*\d+)$/.test(normalized)
-    )
+  const isPlaceholder = (label) => {
+    const s = String(label || '').trim().toLowerCase()
+    return s === '' || /^((task|step|node|n)\s*\d*)$/.test(s)
   }
 
-  const nodes = rawNodes
-    .map((node, index) => {
-      if (!node || typeof node !== 'object') {
-        return null
-      }
+  const nodes = rawNodes.map((node, i) => {
+    if (!node || typeof node !== 'object') return null
+    const id   = String(node.id || `n${i + 1}`)
+    const data = (node.data && typeof node.data === 'object') ? node.data : {}
+    const desc = data.description || node.description || ''
+    const label = data.label || node.label || node.name || id
+    const priority = ['High', 'Medium', 'Low'].includes(data.priority) ? data.priority : 'Medium'
+    return {
+      id, type: 'task',
+      position: node.position || { x: 0, y: 0 },
+      data: {
+        label:       isPlaceholder(label) && desc ? desc : label,
+        description: desc,
+        features:    Array.isArray(data.features) ? data.features.filter(Boolean) : [],
+        modules:     Array.isArray(data.modules)  ? data.modules.filter(Boolean)  : [],
+        priority,
+        parallel: Boolean(data.parallel),
+      },
+    }
+  }).filter(Boolean)
 
-      const id = String(node.id || `n${index + 1}`)
-      const nodeData = node.data && typeof node.data === 'object' ? node.data : {}
-      const description = nodeData.description || node.description || ''
-      const label = nodeData.label || node.label || node.name || id
-      const features = Array.isArray(nodeData.features) ? nodeData.features : Array.isArray(node.features) ? node.features : []
-      const modules = Array.isArray(nodeData.modules) ? nodeData.modules : Array.isArray(node.modules) ? node.modules : []
+  const nodeIds = new Set(nodes.map((n) => n.id))
 
-      return {
-        id,
-        type: 'default',
-        position: node.position || { x: 0, y: 0 },
-        data: {
-          label: isPlaceholderLabel(label) && description ? description : label,
-          description,
-          features,
-          modules,
-          priority: nodeData.priority || 'Medium',
-          parallel: Boolean(nodeData.parallel),
-        },
-      }
-    })
-    .filter(Boolean)
+  const edges = rawEdges.map((e, i) => {
+    if (!e || typeof e !== 'object') return null
+    const source = String(e.source || e.from || '')
+    const target = String(e.target || e.to   || '')
+    if (!source || !target || !nodeIds.has(source) || !nodeIds.has(target)) return null
+    return { id: String(e.id || `e-${source}-${target}-${i}`), source, target }
+  }).filter(Boolean)
 
-  const nodeIds = new Set(nodes.map((node) => node.id))
-
-  const edges = rawEdges
-    .map((edge, index) => {
-      if (!edge || typeof edge !== 'object') {
-        return null
-      }
-
-      const source = String(edge.source || edge.from || '')
-      const target = String(edge.target || edge.to || '')
-
-      if (!source || !target || !nodeIds.has(source) || !nodeIds.has(target)) {
-        return null
-      }
-
-      return {
-        id: String(edge.id || `e-${source}-${target}-${index + 1}`),
-        source,
-        target,
-      }
-    })
-    .filter(Boolean)
-
-  const order = rawOrder.map((nodeId) => String(nodeId)).filter((nodeId) => nodeIds.has(nodeId))
+  const order = rawOrder.map((id) => String(id)).filter((id) => nodeIds.has(id))
 
   if (nodes.length === 0) {
-    throw new Error('Invalid workflow response: nodes are required')
+    throw new Error('No valid nodes in API response')
   }
 
   return {
-    nodes,
-    edges,
-    order: order.length > 0 ? order : nodes.map((node) => node.id),
-    explanation,
+    nodes, edges,
+    order:       order.length > 0 ? order : nodes.map((n) => n.id),
+    explanation: payload?.explanation?.trim?.() || '',
+    insights:    (payload?.insights && typeof payload.insights === 'object') ? payload.insights : null,
   }
 }
 
-async function fetchWorkflow(projectDescription) {
-  let lastError
+async function fetchWorkflow(desc) {
+  try {
+    const res = await axios.post(
+      `${API_BASE_URL}/generate`,
+      { project_description: desc },
+      { timeout: API_TIMEOUT_MS }
+    )
 
-  for (const baseUrl of apiBaseUrls) {
-    try {
-      const response = await axios.post(
-        `${baseUrl}/generate`,
-        {
-          project_description: projectDescription,
-        },
-        { timeout: 15000 },
-      )
-
-      return normalizeWorkflow(response.data)
-    } catch (error) {
-      lastError = error
-    }
-  }
-
-  throw lastError || new Error('Unable to reach backend generate endpoint')
-}
-
-function App() {
-  const [projectIdea, setProjectIdea] = useState('')
-  const [nodes, setNodes] = useState([])
-  const [edges, setEdges] = useState([])
-  const [workflow, setWorkflow] = useState(null)
-  const [order, setOrder] = useState([])
-  const [explanation, setExplanation] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState('')
-  const [viewMode, setViewMode] = useState('graph')
-
-  const applyWorkflow = (workflowData) => {
-    const workflowNodes = workflowData.nodes
-    const workflowEdges = workflowData.edges
-    const workflowOrder = workflowData.order
-
-    console.log('NODES:', workflowNodes)
-    console.log('EDGES:', workflowEdges)
-
-    setWorkflow(workflowData)
-    setEdges(workflowEdges)
-    setNodes(getLayoutedNodes(workflowNodes, workflowEdges))
-    setOrder(workflowOrder)
-    setExplanation(workflowData.explanation || 'This workflow follows standard development steps.')
-  }
-
-  const generateWorkflow = async () => {
-    const input = projectIdea.trim()
-
-    try {
-      const res = await axios.post('http://127.0.0.1:8000/generate', {
-        project_description: input,
+    if (DEBUG_LOGS) console.log('[fetchWorkflow] raw API response:', res.data)
+    const normalized = normalizeWorkflow(res.data)
+    if (DEBUG_LOGS) console.log('[fetchWorkflow] normalized workflow:', normalized)
+    return normalized
+  } catch (e) {
+    if (e?.code === 'ECONNABORTED') {
+      console.error('[fetchWorkflow] request timed out:', {
+        timeoutMs: API_TIMEOUT_MS,
+        message: e?.message,
       })
+    }
+    console.error('[fetchWorkflow] request failed:', {
+      message: e?.message,
+      code: e?.code,
+      status: e?.response?.status,
+      data: e?.response?.data,
+    })
+    throw e
+  }
+}
 
-      console.log('API RESPONSE:', res.data)
+/* ── Priority helpers ────────────────────────────────── */
+const PRIORITY_DOT = { High: '#dc2626', Medium: '#d97706', Low: '#059669' }
 
-      const workflowData = normalizeWorkflow(res.data)
-      setWorkflow(workflowData)
-      setNodes(getLayoutedNodes(workflowData.nodes, workflowData.edges))
-      setEdges(workflowData.edges)
-      setOrder(workflowData.order)
-      setExplanation(workflowData.explanation || 'This workflow follows standard development steps.')
-    } catch (err) {
-      console.error('API ERROR:', err)
-      throw err
+function PBadge({ p }) {
+  return <span className={`pbadge pbadge--${p || 'Medium'}`}>{p || 'Medium'}</span>
+}
+
+/* ── Gantt row estimates (backend doesn't send hours, so we distribute) ── */
+function buildTimeline(nodes, edges) {
+  // topological sort for position
+  const adj = {}
+  const indeg = {}
+  nodes.forEach((n) => { adj[n.id] = []; indeg[n.id] = 0 })
+  edges.forEach((e) => { adj[e.source]?.push(e.target); indeg[e.target] = (indeg[e.target] || 0) + 1 })
+
+  const queue = nodes.filter((n) => (indeg[n.id] || 0) === 0).map((n) => n.id)
+  const topo = []
+  const visited = new Set()
+
+  while (queue.length) {
+    const cur = queue.shift()
+    if (visited.has(cur)) continue
+    visited.add(cur)
+    topo.push(cur)
+    ;(adj[cur] || []).forEach((nxt) => {
+      indeg[nxt]--
+      if (indeg[nxt] === 0) queue.push(nxt)
+    })
+  }
+
+  // assign hours proportional to features count
+  const nodeMap = {}
+  nodes.forEach((n) => { nodeMap[n.id] = n })
+
+  const hrsMap = {}
+  nodes.forEach((n) => {
+    const feats = (n.data?.features?.length || 0)
+    hrsMap[n.id] = Math.max(3, feats * 1.5 + 2)
+  })
+
+  // assign start based on longest predecessor path
+  const startMap = {}
+  topo.forEach((id) => {
+    const preds = edges.filter((e) => e.target === id).map((e) => e.source)
+    startMap[id] = preds.length === 0
+      ? 0
+      : Math.max(...preds.map((p) => (startMap[p] || 0) + (hrsMap[p] || 4)))
+  })
+
+  const totalHrs = Math.max(...nodes.map((n) => (startMap[n.id] || 0) + (hrsMap[n.id] || 4)))
+
+  return nodes.map((n) => ({
+    id:    n.id,
+    label: n.data?.label,
+    priority: n.data?.priority,
+    parallel: n.data?.parallel,
+    startPct: ((startMap[n.id] || 0) / totalHrs) * 100,
+    widthPct: ((hrsMap[n.id] || 4) / totalHrs) * 100,
+    hrs:      Math.round(hrsMap[n.id] || 4),
+    totalHrs: Math.round(totalHrs),
+  }))
+}
+
+/* ════════════════════════════════════════════════════════
+   LANDING PAGE
+   ════════════════════════════════════════════════════════ */
+function Landing({ onGenerate }) {
+  const [idea, setIdea] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState('')
+  const submitInFlightRef = useRef(false)
+
+  const CHIPS = ['E-commerce platform', 'Mobile app', 'ML pipeline', 'SaaS onboarding']
+
+  async function handle() {
+    if (submitInFlightRef.current || loading) return
+    const val = idea.trim()
+    if (!val) { setErr('Please enter a project idea.'); return }
+    submitInFlightRef.current = true
+    setLoading(true); setErr('')
+    try {
+      await onGenerate(val)
+    } catch (e) {
+      if (e?.code === 'ECONNABORTED') {
+        setErr('Request timed out. Backend is still processing. Try again in a few seconds.')
+      } else {
+        setErr('Could not reach backend. Make sure it is running.')
+      }
+    } finally {
+      submitInFlightRef.current = false
+      setLoading(false)
     }
   }
 
-  const handleGenerate = async () => {
-    const idea = projectIdea.trim()
-    if (!idea) {
-      setError('Please enter a project idea')
-      return
-    }
+  return (
+    <div className="landing">
+      {/* Nav */}
+      <nav className="landing-nav">
+        <div className="brand">
+          <div className="brand-logo">P</div>
+          <span className="brand-name">PROMAP</span>
+        </div>
+        <span className="ai-badge">AI Workflow Engine</span>
+      </nav>
 
+      {/* Hero */}
+      <div className="landing-hero">
+        <p className="hero-eyebrow">Intelligent Workflow Structuring</p>
+        <h1 className="hero-title">
+          Turn ideas into<br />
+          <span className="hero-title-accent">dependency maps</span>
+        </h1>
+        <p className="hero-sub">
+          Describe your project in plain English. PROMAP generates a complete task graph,
+          dependency map, and execution plan — instantly.
+        </p>
+
+        <div className="hero-input-wrap">
+          <input
+            className="hero-input"
+            value={idea}
+            onChange={(e) => setIdea(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                if (!e.repeat && !submitInFlightRef.current && !loading) handle()
+              }
+            }}
+            placeholder="Mobile app with auth, push notifications and offline sync"
+          />
+          <button className="hero-btn" onClick={handle} disabled={loading}>
+            {loading
+              ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}><span className="spinner" />Generating…</span>
+              : 'Generate →'}
+          </button>
+        </div>
+
+        {err && <p style={{ margin: '0 0 12px', color: 'var(--red)', fontSize: 12, fontWeight: 600 }}>{err}</p>}
+
+        <div className="hero-chips">
+          {CHIPS.map((c) => (
+            <span key={c} className="hero-chip" onClick={() => setIdea(c)}>{c}</span>
+          ))}
+        </div>
+
+        <div className="hero-stats">
+          <div className="hero-stat"><div className="hero-stat-val">DAG</div><div className="hero-stat-label">Graph View</div></div>
+          <div className="hero-stat"><div className="hero-stat-val">CPM</div><div className="hero-stat-label">Critical Path</div></div>
+          <div className="hero-stat"><div className="hero-stat-val">‖</div><div className="hero-stat-label">Parallel Tasks</div></div>
+          <div className="hero-stat"><div className="hero-stat-val">AI</div><div className="hero-stat-label">Insights</div></div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ════════════════════════════════════════════════════════
+   DASHBOARD
+   ════════════════════════════════════════════════════════ */
+function Dashboard({ workflow, projectName, onBack, onRegenerate }) {
+  const [viewMode, setViewMode]       = useState('graph')   // 'graph' | 'list' | 'timeline'
+  const [selectedId, setSelectedId]   = useState(null)
+  const [isLoading, setIsLoading]     = useState(false)
+
+  const { nodes: rawNodes, edges, order, explanation, insights } = workflow
+
+  const nodes = useMemo(() => getLayoutedNodes(rawNodes, edges), [rawNodes, edges])
+
+  const nodeById = useMemo(() => {
+    const m = {}; nodes.forEach((n) => { m[n.id] = n }); return m
+  }, [nodes])
+
+  const nodeLabelMap = useMemo(() => {
+    const m = {}; nodes.forEach((n) => { m[n.id] = n.data?.label || n.id }); return m
+  }, [nodes])
+
+  const selectedNode = selectedId ? nodeById[selectedId] : null
+
+  const deps = useMemo(() =>
+    edges.map((e) => {
+      const s = nodeById[e.source]; const t = nodeById[e.target]
+      if (!s || !t) return null
+      return { id: e.id, src: s.data?.label || e.source, tgt: t.data?.label || e.target }
+    }).filter(Boolean),
+    [edges, nodeById]
+  )
+
+  const criticalCount  = nodes.filter((n) => n.data?.priority === 'High').length
+  const parallelCount  = nodes.filter((n) => n.data?.parallel).length
+  const blockedCount   = nodes.filter((n) => {
+    return edges.filter((e) => e.target === n.id).length >= 2
+  }).length
+
+  const timelineRows = useMemo(() => buildTimeline(nodes, edges), [nodes, edges])
+  const totalHrs     = timelineRows[0]?.totalHrs || 0
+
+  /* Node click → select & update right panel */
+  const flowNodes = useMemo(
+    () =>
+      nodes.map((n) => ({
+        ...n,
+        selected: n.id === selectedId,
+      })),
+    [nodes, selectedId]
+  )
+
+  /* AI insight cards from backend insights + static reasoning */
+  const insightCards = [
+    {
+      type: 'CRITICAL PATH', color: 'purple',
+      title: 'On the critical path',
+      body: 'Any delay here cascades to the entire delivery timeline. Prioritize unblocking this task above all others.',
+    },
+    {
+      type: 'BOTTLENECK', color: 'amber',
+      title: 'Convergence bottleneck',
+      body: `${Math.max(2, edges.filter((e) => e.target === (selectedNode?.id)).length)} upstream tasks must complete first. Start notification templates in parallel to save time.`,
+    },
+    {
+      type: 'SUGGESTION', color: 'green',
+      title: 'Parallelizable subtask',
+      body: 'Email template design can run with an upstream task concurrently — saving time on the critical path.',
+    },
+  ]
+
+  /* Dep chips for selected node */
+  const selectedDeps = selectedNode
+    ? edges.filter((e) => e.target === selectedNode.id).map((e) => nodeLabelMap[e.source]).filter(Boolean)
+    : []
+
+  async function handleRegenerate() {
+    if (isLoading) return
     setIsLoading(true)
-    setError('')
-
     try {
-      await generateWorkflow()
-    } catch (requestError) {
-      console.error('Workflow generation failed, using fallback data.', requestError)
-      setError('Failed to generate workflow')
-      applyWorkflow(normalizeWorkflow(fallbackWorkflow))
+      await onRegenerate()
+    } catch (e) {
+      console.error('[Dashboard] regenerate failed:', e)
     } finally {
       setIsLoading(false)
     }
   }
 
-  const nodeLabelMap = useMemo(() => {
-    const map = {}
-    nodes.forEach((node) => {
-      map[node.id] = node.data?.label || node.id
-    })
-    return map
-  }, [nodes])
-
-  const nodeById = useMemo(() => {
-    const map = {}
-    nodes.forEach((node) => {
-      map[node.id] = node
-    })
-    return map
-  }, [nodes])
-
-  const getPriorityColor = (priority) => {
-    if (priority === 'High') return '#dc2626'
-    if (priority === 'Low') return '#16a34a'
-    return '#f97316'
-  }
-
-  const highestPriorityTask = useMemo(() => {
-    const priorityOrder = { High: 3, Medium: 2, Low: 1 }
-    return nodes.reduce((max, node) => {
-      const nodePriority = priorityOrder[node.data?.priority] || 2
-      const maxPriority = priorityOrder[max.data?.priority] || 2
-      return nodePriority > maxPriority ? node : max
-    }, nodes[0] || null)
-  }, [nodes])
-
-  const bottleneck = nodes.find((node) => node.data?.priority === 'High') || nodes[0] || null
-
-  const dependencies = useMemo(() => {
-    return edges
-      .map((edge) => {
-        const source = nodeById[edge.source]
-        const target = nodeById[edge.target]
-
-        if (!source || !target) {
-          return null
-        }
-
-        return `${source.data?.label || source.id} → ${target.data?.label || target.id}`
-      })
-      .filter(Boolean)
-  }, [edges, nodeById])
-
-  const firstTask = order.length > 0 ? nodes.find((n) => n.id === order[0]) : null
-  const lastTask = order.length > 0 ? nodes.find((n) => n.id === order[order.length - 1]) : null
-
   return (
-    <div className="app">
-      <Header />
+    <div className="dashboard app">
+      {/* ── Top Bar ── */}
+      <header className="topbar">
+        <div className="brand" style={{ cursor: 'pointer' }} onClick={onBack}>
+          <div className="brand-logo">P</div>
+          <span className="brand-name">PROMAP</span>
+        </div>
+        <div className="topbar-sep" />
+        <div className="breadcrumb">
+          <span style={{ cursor: 'pointer', color: 'var(--text-3)' }} onClick={onBack}>Workspace</span>
+          <span>›</span>
+          <span className="active">{projectName}</span>
+        </div>
+        <div className="topbar-spacer" />
+        <div className="view-tabs">
+          {['graph', 'list', 'timeline'].map((v) => (
+            <button key={v} className={`view-tab${viewMode === v ? ' active' : ''}`} onClick={() => setViewMode(v)}>
+              {v.charAt(0).toUpperCase() + v.slice(1)}
+            </button>
+          ))}
+        </div>
+        <button className="regen-btn" onClick={handleRegenerate} disabled={isLoading}>
+          {isLoading ? 'Regenerating…' : '↺ Regenerate'}
+        </button>
+      </header>
 
-      <main className="app-main">
-        <InputCard
-          projectIdea={projectIdea}
-          isLoading={isLoading}
-          onProjectIdeaChange={setProjectIdea}
-          onGenerate={handleGenerate}
-        />
+      {/* ── Body ── */}
+      <div className="dashboard-body">
 
-        {explanation ? (
-          <section className="card" style={{ marginTop: '1rem', padding: '1.25rem 1.5rem' }}>
-            <h3 style={{ margin: '0 0 0.5rem', fontSize: '1.05rem', fontWeight: 700 }}>💡 AI Explanation</h3>
-            <p style={{ margin: 0, color: '#374151', lineHeight: 1.7 }}>{explanation}</p>
-          </section>
-        ) : null}
-
-        {error ? <p className="error-message">{error}</p> : null}
-
-        {nodes.length > 0 && (
-          <div style={{ marginTop: '2rem' }}>
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem', borderBottom: '2px solid #e5e7eb' }}>
-              <button
-                onClick={() => setViewMode('graph')}
-                style={{
-                  padding: '0.875rem 1.5rem',
-                  borderRadius: '12px 12px 0 0',
-                  border: 'none',
-                  fontSize: '0.95rem',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  background: viewMode === 'graph' ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' : 'transparent',
-                  color: viewMode === 'graph' ? '#ffffff' : '#6b7280',
-                  transition: 'all 0.2s ease',
-                }}
-                onMouseEnter={(e) => {
-                  if (viewMode !== 'graph') {
-                    e.currentTarget.style.color = '#374151'
-                    e.currentTarget.style.background = '#f3f4f6'
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (viewMode !== 'graph') {
-                    e.currentTarget.style.color = '#6b7280'
-                    e.currentTarget.style.background = 'transparent'
-                  }
-                }}
+        {/* ── Left Sidebar ── */}
+        <aside className="sidebar">
+          <div className="sidebar-section">
+            <div className="sidebar-label">Views</div>
+            {[
+              { key: 'graph',    label: 'Graph View',  dot: '#2563eb' },
+              { key: 'list',     label: 'List View',   dot: '#9b9aaa' },
+              { key: 'timeline', label: 'Timeline',    dot: '#9b9aaa' },
+            ].map((item) => (
+              <div key={item.key}
+                className={`sidebar-item${viewMode === item.key ? ' active' : ''}`}
+                onClick={() => setViewMode(item.key)}
               >
-                📊 Graph View
-              </button>
-              <button
-                onClick={() => setViewMode('list')}
-                style={{
-                  padding: '0.875rem 1.5rem',
-                  borderRadius: '12px 12px 0 0',
-                  border: 'none',
-                  fontSize: '0.95rem',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  background: viewMode === 'list' ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' : 'transparent',
-                  color: viewMode === 'list' ? '#ffffff' : '#6b7280',
-                  transition: 'all 0.2s ease',
-                }}
-                onMouseEnter={(e) => {
-                  if (viewMode !== 'list') {
-                    e.currentTarget.style.color = '#374151'
-                    e.currentTarget.style.background = '#f3f4f6'
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (viewMode !== 'list') {
-                    e.currentTarget.style.color = '#6b7280'
-                    e.currentTarget.style.background = 'transparent'
-                  }
-                }}
-              >
-                📋 List View
-              </button>
-            </div>
-          </div>
-        )}
-
-        {viewMode === 'graph' && nodes.length > 0 && (
-          <div style={{ minHeight: nodes.length > 8 ? '700px' : '500px', marginBottom: '2rem' }}>
-            <h3 style={{ margin: '0 0 1rem', fontSize: '1.15rem', fontWeight: 700 }}>📊 Workflow Graph</h3>
-            <WorkflowGraph nodes={nodes} edges={edges} />
-          </div>
-        )}
-
-        {viewMode === 'list' && nodes.length > 0 && (
-          <section className="card" style={{ padding: '2rem', marginBottom: '2rem' }}>
-            <h2 style={{ marginTop: 0, marginBottom: '1.5rem', fontSize: '1.2rem', fontWeight: 700 }}>📋 Workflow Tasks</h2>
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr style={{ borderBottom: '2px solid #e5e7eb', backgroundColor: '#f9fafb' }}>
-                    <th style={{ padding: '1rem', textAlign: 'left', fontWeight: 700, fontSize: '0.95rem', color: '#374151' }}>Task</th>
-                    <th style={{ padding: '1rem', textAlign: 'left', fontWeight: 700, fontSize: '0.95rem', color: '#374151' }}>Description</th>
-                    <th style={{ padding: '1rem', textAlign: 'center', fontWeight: 700, fontSize: '0.95rem', color: '#374151' }}>Priority</th>
-                    <th style={{ padding: '1rem', textAlign: 'center', fontWeight: 700, fontSize: '0.95rem', color: '#374151' }}>Dependencies</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {nodes.map((node, index) => {
-                    const incomingEdges = edges.filter((e) => e.target === node.id)
-                    return (
-                      <tr key={node.id} style={{ borderBottom: '1px solid #e5e7eb', background: index % 2 === 0 ? 'transparent' : '#f9fafb', transition: 'background 0.2s ease' }} onMouseEnter={(e) => { e.currentTarget.style.background = '#f3f4f6' }} onMouseLeave={(e) => { e.currentTarget.style.background = index % 2 === 0 ? 'transparent' : '#f9fafb' }}>
-                        <td style={{ padding: '1rem', fontWeight: 600, color: '#111827' }}>{node.data?.label}</td>
-                        <td style={{ padding: '1rem', color: '#6b7280', fontSize: '0.94rem' }}>{node.data?.description || '—'}</td>
-                        <td style={{ padding: '1rem', textAlign: 'center' }}>
-                          <span style={{ display: 'inline-block', padding: '4px 10px', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', ...(node.data?.priority === 'High' ? { backgroundColor: '#fee2e2', color: '#991b1b' } : node.data?.priority === 'Low' ? { backgroundColor: '#dcfce7', color: '#166534' } : { backgroundColor: '#fed7aa', color: '#92400e' }) }}>
-                            {node.data?.priority || 'Medium'}
-                          </span>
-                        </td>
-                        <td style={{ padding: '1rem', textAlign: 'center', color: '#6b7280', fontSize: '0.94rem' }}>
-                          {incomingEdges.length > 0 ? (
-                            <span>{incomingEdges.map((e) => nodeLabelMap[e.source]).join(', ')}</span>
-                          ) : (
-                            <span style={{ color: '#16a34a', fontWeight: 600 }}>Start</span>
-                          )}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
-
-        {nodes.length > 0 && viewMode === 'graph' && (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem', marginTop: '2rem' }}>
-            <section className="card" style={{ padding: '1.5rem', background: 'linear-gradient(135deg, #ffffff 0%, #f9fafb 100%)' }}>
-              <h3 style={{ marginBottom: '1rem', fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>🧩 Tasks</h3>
-              <ol style={{ listStyleType: 'decimal', paddingLeft: '1.5rem', lineHeight: 2, margin: 0 }}>
-                {nodes.map((node) => (
-                  <li key={node.id} style={{ marginBottom: '0.5rem', fontWeight: 500, color: '#374151', cursor: 'pointer', transition: 'color 0.2s ease' }} onMouseEnter={(e) => { e.currentTarget.style.color = '#667eea' }} onMouseLeave={(e) => { e.currentTarget.style.color = '#374151' }}>
-                    <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', backgroundColor: getPriorityColor(node.data?.priority), marginRight: '0.5rem', verticalAlign: 'middle' }} />
-                    {node.data?.label}
-                  </li>
-                ))}
-              </ol>
-            </section>
-
-            <section className="card" style={{ padding: '1.5rem' }}>
-              <h3 style={{ marginBottom: '1rem', fontSize: '1.1rem', fontWeight: 600 }}>🔗 Dependencies</h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                {dependencies.length > 0 ? (
-                  dependencies.map((dependency, index) => (
-                    <div key={`${dependency}-${index}`} style={{ padding: '0.875rem 1rem', borderRadius: '10px', backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', fontWeight: 500, color: '#374151' }}>
-                      {dependency}
-                    </div>
-                  ))
-                ) : (
-                  <p style={{ margin: 0, color: '#6b7280' }}>No dependencies available.</p>
-                )}
-              </div>
-            </section>
-
-            <section className="card" style={{ padding: '1.5rem', gridColumn: '1 / -1', background: 'linear-gradient(135deg, #ffffff 0%, #f9fafb 100%)' }}>
-              <h3 style={{ marginBottom: '1rem', fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>🤖 AI Insights</h3>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem' }}>
-                <div style={{ padding: '1rem', borderRadius: '12px', background: '#f8fafc', border: '1px solid #e5e7eb' }}>
-                  <p style={{ margin: '0 0 0.35rem', fontSize: '0.85rem', color: '#6b7280' }}>Start with</p>
-                  <p style={{ margin: 0, fontWeight: 700 }}>{firstTask?.data?.label || '—'}</p>
-                </div>
-                <div style={{ padding: '1rem', borderRadius: '12px', background: '#f8fafc', border: '1px solid #e5e7eb' }}>
-                  <p style={{ margin: '0 0 0.35rem', fontSize: '0.85rem', color: '#6b7280' }}>Finish with</p>
-                  <p style={{ margin: 0, fontWeight: 700 }}>{lastTask?.data?.label || '—'}</p>
-                </div>
-                <div style={{ padding: '1rem', borderRadius: '12px', background: '#f8fafc', border: '1px solid #e5e7eb' }}>
-                  <p style={{ margin: '0 0 0.35rem', fontSize: '0.85rem', color: '#6b7280' }}>Bottleneck</p>
-                  <p style={{ margin: 0, fontWeight: 700, color: getPriorityColor(bottleneck?.data?.priority) }}>{bottleneck?.data?.label || '—'}</p>
+                <div className="sidebar-item-left">
+                  <div className="sidebar-dot" style={{ background: viewMode === item.key ? '#2563eb' : item.dot }} />
+                  {item.label}
                 </div>
               </div>
-            </section>
+            ))}
+          </div>
 
-            <section className="card" style={{ padding: '1.5rem', gridColumn: '1 / -1' }}>
-              <h3 style={{ margin: '0 0 1rem', fontSize: '1.15rem', fontWeight: 700 }}>Feature & Module Breakdown</h3>
-              <div style={{ display: 'grid', gap: '1rem' }}>
-                {nodes.map((node) => (
-                  <div key={node.id} style={{ padding: '1rem', borderRadius: '12px', border: '1px solid #e5e7eb', background: '#fff' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
-                      <strong style={{ color: '#111827' }}>{node.data?.label}</strong>
-                      <span style={{ fontSize: '0.85rem', color: '#6b7280' }}>{node.data?.priority || 'Medium'}</span>
-                    </div>
-                    <div style={{ display: 'grid', gap: '0.75rem' }}>
-                      <div>
-                        <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#6b7280', marginBottom: '0.35rem' }}>Features</div>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                          {(node.data?.features || []).length > 0 ? (
-                            node.data.features.map((feature) => (
-                              <span key={feature} style={{ padding: '0.35rem 0.7rem', borderRadius: '999px', background: '#eef2ff', color: '#3730a3', fontSize: '0.85rem' }}>
-                                {feature}
-                              </span>
-                            ))
-                          ) : (
-                            <span style={{ color: '#9ca3af' }}>No features listed</span>
-                          )}
-                        </div>
+          <div className="sidebar-section">
+            <div className="sidebar-label">Tasks</div>
+            <div className="sidebar-item">
+              <div className="sidebar-item-left"><div className="sidebar-dot" style={{ background: '#dc2626' }} />Critical</div>
+              <span className="sidebar-count" style={{ background: '#fef2f2', color: '#dc2626' }}>{criticalCount}</span>
+            </div>
+            <div className="sidebar-item">
+              <div className="sidebar-item-left"><div className="sidebar-dot" style={{ background: '#059669' }} />Parallel</div>
+              <span className="sidebar-count" style={{ background: '#ecfdf5', color: '#059669' }}>{parallelCount}</span>
+            </div>
+            <div className="sidebar-item">
+              <div className="sidebar-item-left"><div className="sidebar-dot" style={{ background: '#d97706' }} />Blocked</div>
+              <span className="sidebar-count" style={{ background: '#fffbeb', color: '#d97706' }}>{blockedCount}</span>
+            </div>
+          </div>
+
+          <div className="sidebar-section">
+            <div className="sidebar-label">Insights</div>
+            <div className="sidebar-item"><div className="sidebar-item-left"><div className="sidebar-dot" style={{ background: '#7c3aed' }} />AI Analysis</div></div>
+            <div className="sidebar-item"><div className="sidebar-item-left"><div className="sidebar-dot" style={{ background: '#9b9aaa' }} />Bottlenecks</div></div>
+          </div>
+        </aside>
+
+        {/* ── Center Content ── */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+
+          {/* Explanation banner */}
+          {explanation && (
+            <div style={{ padding: '12px 20px 0' }}>
+              <div className="expl-banner">
+                <div className="expl-icon">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                  </svg>
+                </div>
+                <div>
+                  <p className="expl-label">AI Explanation</p>
+                  <p className="expl-text">{explanation}</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Insights strip (from backend .insights) */}
+          {insights && (
+            <div style={{ padding: '12px 20px 0' }}>
+              <div className="insights-strip" style={{ padding: 0 }}>
+                <div className="ins-card ins-card--start">
+                  <p className="ins-label">Start with</p>
+                  <p className="ins-value">{insights.start || '—'}</p>
+                </div>
+                <div className="ins-card ins-card--end">
+                  <p className="ins-label">Finish with</p>
+                  <p className="ins-value">{insights.end || '—'}</p>
+                </div>
+                <div className="ins-card ins-card--bottle">
+                  <p className="ins-label">Bottleneck</p>
+                  <p className="ins-value" style={{ color: '#d97706' }}>{insights.bottleneck || '—'}</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── GRAPH VIEW ── */}
+          {viewMode === 'graph' && (
+            <div className="canvas-area" style={{ flex: 1, marginTop: 12 }}>
+              <div className="canvas-grid" />
+              <WorkflowGraph nodes={flowNodes} edges={edges} onNodeClick={(_, n) => setSelectedId(n.id)} />
+            </div>
+          )}
+
+          {/* ── LIST VIEW ── */}
+          {viewMode === 'list' && (
+            <div className="list-view-wrap" style={{ flex: 1 }}>
+              <div className="list-card">
+                <div className="list-card-header">
+                  <span className="list-card-title">List view</span>
+                  <span className="count-badge">{nodes.length} tasks</span>
+                  <div className="list-spacer" />
+                  <span className="list-hint">Topological order</span>
+                </div>
+                {nodes.map((node, i) => {
+                  const incoming = edges.filter((e) => e.target === node.id)
+                  return (
+                    <div key={node.id} className="list-row" onClick={() => setSelectedId(node.id)}>
+                      <span className="list-row-num">0{i + 1}</span>
+                      <div className="list-row-dot" style={{ background: PRIORITY_DOT[node.data?.priority] || '#d97706' }} />
+                      <span className="list-row-name">{node.data?.label}</span>
+                      <div className="mini-chips">
+                        {incoming.map((e) => (
+                          <span key={e.id} className="mini-chip mini-chip--blue">{nodeLabelMap[e.source]}</span>
+                        ))}
                       </div>
-                      <div>
-                        <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#6b7280', marginBottom: '0.35rem' }}>Modules</div>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                          {(node.data?.modules || []).length > 0 ? (
-                            node.data.modules.map((module) => (
-                              <span key={module} style={{ padding: '0.35rem 0.7rem', borderRadius: '999px', background: '#ecfeff', color: '#155e75', fontSize: '0.85rem' }}>
-                                {module}
-                              </span>
-                            ))
-                          ) : (
-                            <span style={{ color: '#9ca3af' }}>No modules listed</span>
-                          )}
+                      <PBadge p={node.data?.priority} />
+                      {node.data?.parallel && <span className="mini-chip mini-chip--par">‖ Parallel</span>}
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* Timeline in list view too */}
+              <div className="list-card" style={{ marginTop: 16 }}>
+                <div className="list-card-header">
+                  <span className="list-card-title">Timeline view</span>
+                  <span className="count-badge" style={{ background: '#fffbeb', color: '#d97706', borderColor: '#fde68a' }}>
+                    {totalHrs}h total
+                  </span>
+                  <div className="list-spacer" />
+                  <span className="list-hint">Critical path: {Math.round(totalHrs * .73)}h</span>
+                </div>
+                <div className="timeline-wrap">
+                  <div className="timeline-header-row">
+                    {['Day 1','Day 2','Day 3','Day 4','Day 5'].map((d) => (
+                      <div key={d} className="timeline-day">{d}</div>
+                    ))}
+                  </div>
+
+                  {/* Group parallel tasks visually */}
+                  {(() => {
+                    const rows = []
+                    let i = 0
+                    while (i < timelineRows.length) {
+                      const row = timelineRows[i]
+                      const nextRow = timelineRows[i + 1]
+                      if (row.parallel || (nextRow && nextRow.parallel)) {
+                        const group = [row]
+                        while (timelineRows[i + 1]?.parallel) { i++; group.push(timelineRows[i]) }
+                        rows.push({ type: 'parallel', items: group })
+                      } else {
+                        rows.push({ type: 'single', item: row })
+                      }
+                      i++
+                    }
+                    return rows.map((r, ri) => {
+                      if (r.type === 'single') {
+                        const row = r.item
+                        const isLast = ri === rows.length - 1
+                        return (
+                          <div key={row.id} className="timeline-task-row">
+                            <div className="timeline-label">{row.label}</div>
+                            <div className="timeline-track">
+                              {isLast && <div className="timeline-crit-line" style={{ left: `${row.startPct}%` }} />}
+                              <TBar row={row} />
+                            </div>
+                          </div>
+                        )
+                      }
+                      return (
+                        <div key={ri} className="timeline-parallel-group">
+                          <div className="timeline-par-label">‖ PARALLEL</div>
+                          {r.items.map((row) => (
+                            <div key={row.id} className="timeline-task-row">
+                              <div className="timeline-label">{row.label}</div>
+                              <div className="timeline-track"><TBar row={row} /></div>
+                            </div>
+                          ))}
                         </div>
+                      )
+                    })
+                  })()}
+
+                  <div className="timeline-legend">
+                    {[
+                      { color: '#fca5a5', border: '#ef4444', label: 'Critical' },
+                      { color: '#fde68a', border: '#d97706', label: 'High' },
+                      { color: '#bfdbfe', border: '#2563eb', label: 'Medium' },
+                      { color: '#a7f3d0', border: '#059669', label: 'Parallel cluster' },
+                    ].map((l) => (
+                      <div key={l.label} className="legend-item">
+                        <div className="legend-swatch" style={{ background: l.color, border: `1px solid ${l.border}` }} />
+                        {l.label}
+                      </div>
+                    ))}
+                    <div style={{ flex: 1 }} />
+                    <span style={{ fontSize: 10, color: 'var(--text-3)' }}>Dashed = longest task → drives timeline</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Execution steps */}
+              <div className="steps-wrap" style={{ padding: '16px 0 0' }}>
+                <div className="steps-card">
+                  <p className="steps-title">Execution Order</p>
+                  <p className="steps-sub">Step-by-step sequence for completing the workflow.</p>
+                  <ol className="steps-list">
+                    {order.map((id, idx) => (
+                      <li key={`${id}-${idx}`} className="steps-item">
+                        <span className="steps-num">{idx + 1}</span>
+                        <span className="steps-name">{nodeLabelMap[id] || id}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── TIMELINE VIEW ── */}
+          {viewMode === 'timeline' && (
+            <div className="list-view-wrap" style={{ flex: 1 }}>
+              <div className="list-card">
+                <div className="list-card-header">
+                  <span className="list-card-title">Timeline view</span>
+                  <span className="count-badge" style={{ background: '#fffbeb', color: '#d97706', borderColor: '#fde68a' }}>
+                    {totalHrs}h total
+                  </span>
+                  <div className="list-spacer" />
+                  <span className="list-hint">Critical path: {Math.round(totalHrs * .73)}h</span>
+                </div>
+                <div className="timeline-wrap">
+                  <div className="timeline-header-row">
+                    {['Day 1','Day 2','Day 3','Day 4','Day 5'].map((d) => (
+                      <div key={d} className="timeline-day">{d}</div>
+                    ))}
+                  </div>
+                  {timelineRows.map((row, ri) => (
+                    <div key={row.id} className="timeline-task-row">
+                      <div className="timeline-label">{row.label}</div>
+                      <div className="timeline-track">
+                        {ri === timelineRows.length - 1 && (
+                          <div className="timeline-crit-line" style={{ left: `${row.startPct}%` }} />
+                        )}
+                        <TBar row={row} />
                       </div>
                     </div>
+                  ))}
+                  <div className="timeline-legend">
+                    {[
+                      { color: '#fca5a5', border: '#ef4444', label: 'Critical' },
+                      { color: '#fde68a', border: '#d97706', label: 'High' },
+                      { color: '#bfdbfe', border: '#2563eb', label: 'Medium' },
+                      { color: '#a7f3d0', border: '#059669', label: 'Parallel cluster' },
+                    ].map((l) => (
+                      <div key={l.label} className="legend-item">
+                        <div className="legend-swatch" style={{ background: l.color, border: `1px solid ${l.border}` }} />
+                        {l.label}
+                      </div>
+                    ))}
+                    <div style={{ flex: 1 }} />
+                    <span style={{ fontSize: 10, color: 'var(--text-3)' }}>Dashed = longest task → drives timeline</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── Right Panel ── */}
+        <aside className="right-panel">
+          {selectedNode ? (
+            <>
+              <div className="panel-header">
+                <p className="panel-title">{selectedNode.data?.label}</p>
+                <p className="panel-sub">Task details &amp; AI reasoning</p>
+              </div>
+
+              <div className="priority-row">
+                <div className="priority-dot-lg" style={{ background: PRIORITY_DOT[selectedNode.data?.priority] || '#d97706' }} />
+                <PBadge p={selectedNode.data?.priority} />
+                <div style={{ flex: 1 }} />
+              </div>
+
+              <div className="panel-section">
+                <p className="panel-section-label">Description</p>
+                <p className="panel-desc">{selectedNode.data?.description || 'No description provided.'}</p>
+              </div>
+
+              {selectedDeps.length > 0 && (
+                <div className="panel-section">
+                  <p className="panel-section-label">Dependencies</p>
+                  <div className="dep-chips">
+                    {selectedDeps.map((d) => <span key={d} className="dep-chip">{d}</span>)}
+                  </div>
+                </div>
+              )}
+
+              {/* Features + Modules from backend */}
+              {(selectedNode.data?.features?.length > 0 || selectedNode.data?.modules?.length > 0) && (
+                <div className="panel-section">
+                  {selectedNode.data?.features?.length > 0 && (
+                    <>
+                      <p className="panel-section-label">Features</p>
+                      <div className="dep-chips" style={{ marginBottom: 10 }}>
+                        {selectedNode.data.features.map((f) => (
+                          <span key={f} className="dep-chip" style={{ background: 'var(--blue-bg)', borderColor: 'var(--blue-border)', color: '#1d4ed8' }}>{f}</span>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  {selectedNode.data?.modules?.length > 0 && (
+                    <>
+                      <p className="panel-section-label">Modules</p>
+                      <div className="dep-chips">
+                        {selectedNode.data.modules.map((m) => (
+                          <span key={m} className="dep-chip" style={{ background: '#ecfeff', borderColor: '#a5f3fc', color: '#155e75' }}>{m}</span>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              <div className="panel-section">
+                <p className="panel-section-label">AI Reasoning</p>
+                <div className="ai-reasoning-box">
+                  <div className="ai-reasoning-header">
+                    <span className="ai-chip-sm">AI</span>
+                    <p className="ai-reasoning-title">Why this task exists</p>
+                  </div>
+                  <p className="ai-reasoning-body">
+                    {selectedNode.data?.description
+                      ? `${selectedNode.data.label} is a foundational step in this workflow — it enables downstream tasks to function correctly and cannot be deferred without blocking progress.`
+                      : 'This task is part of the AI-generated execution plan.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="panel-section">
+                <p className="panel-section-label">AI Insights</p>
+                {insightCards.map((card) => (
+                  <div key={card.type} className={`insight-card-panel insight-card-panel--${card.color}`}>
+                    <div className="insight-type-chip">{card.type}</div>
+                    <p className="insight-card-title">{card.title}</p>
+                    <p className="insight-card-body">{card.body}</p>
                   </div>
                 ))}
               </div>
-            </section>
-
-          </div>
-        )}
-
-        {nodes.length > 0 && <ExecutionSteps order={order} nodeLabelMap={nodeLabelMap} />}
-      </main>
+            </>
+          ) : (
+            <div style={{ padding: '24px 18px', color: 'var(--text-3)', fontSize: 12, lineHeight: 1.6 }}>
+              <p style={{ margin: '0 0 8px', fontFamily: 'Sora, sans-serif', fontWeight: 700, fontSize: 13, color: 'var(--text-2)' }}>
+                Task Details
+              </p>
+              <p style={{ margin: 0 }}>Click any node in the graph to see task details, dependencies, and AI reasoning here.</p>
+            </div>
+          )}
+        </aside>
+      </div>
     </div>
   )
 }
 
-export default App
+/* Gantt bar helper */
+function TBar({ row }) {
+  const colors = {
+    High:   { bg: '#fef2f2', border: '#fca5a5', text: '#b91c1c' },
+    Medium: { bg: '#eff6ff', border: '#bfdbfe', text: '#1e40af' },
+    Low:    { bg: '#ecfdf5', border: '#a7f3d0', text: '#065f46' },
+  }
+  const c = colors[row.priority] || colors.Medium
+  return (
+    <div
+      className="timeline-bar"
+      style={{
+        left:        `${row.startPct}%`,
+        width:       `${Math.max(row.widthPct, 8)}%`,
+        background:  c.bg,
+        borderWidth: '1px',
+        borderColor: c.border,
+        borderStyle: row.parallel ? 'dashed' : 'solid',
+        color:       c.text,
+      }}
+    >
+      {row.hrs > 4 ? `${row.label.split(' ')[0]} (${row.hrs}h)` : row.label.split(' ')[0]}
+    </div>
+  )
+}
+
+/* ════════════════════════════════════════════════════════
+   ROOT APP
+   ════════════════════════════════════════════════════════ */
+export default function App() {
+  const [workflow,    setWorkflow]    = useState(null)
+  const [projectName, setProjectName] = useState('')
+  const requestInFlightRef = useRef(false)
+  const lastWorkflowLogRef = useRef('')
+
+  useEffect(() => {
+    if (!DEBUG_LOGS || !workflow) return
+    const key = `${workflow.nodes?.length || 0}-${workflow.edges?.length || 0}-${workflow.order?.length || 0}-${projectName}`
+    if (lastWorkflowLogRef.current === key) return
+    lastWorkflowLogRef.current = key
+    console.log('[App] workflow state update:', {
+      nodes: workflow.nodes?.length || 0,
+      edges: workflow.edges?.length || 0,
+      order: workflow.order?.length || 0,
+      projectName,
+    })
+  }, [workflow, projectName])
+
+  async function handleGenerate(idea) {
+    if (requestInFlightRef.current) return null
+    requestInFlightRef.current = true
+    try {
+      const wf = await fetchWorkflow(idea)
+      setWorkflow(wf)
+      setProjectName(idea || 'My Project')
+      return wf
+    } finally {
+      requestInFlightRef.current = false
+    }
+  }
+
+  async function handleRegenerate() {
+    if (requestInFlightRef.current) return null
+    const idea = projectName?.trim()
+    if (!idea) return null
+    requestInFlightRef.current = true
+    if (DEBUG_LOGS) console.log('[App] regenerate trigger:', { idea })
+    try {
+      const wf = await fetchWorkflow(idea)
+      setWorkflow(wf)
+      return wf
+    } finally {
+      requestInFlightRef.current = false
+    }
+  }
+
+  if (!workflow) {
+    return (
+      <Landing
+        onGenerate={async (idea) => {
+          await handleGenerate(idea)
+        }}
+      />
+    )
+  }
+
+  return (
+    <Dashboard
+      workflow={workflow}
+      projectName={projectName}
+      onBack={() => setWorkflow(null)}
+      onRegenerate={handleRegenerate}
+    />
+  )
+}

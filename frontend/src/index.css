@@ -1,0 +1,14 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Inter", "SF Pro Text", "Segoe UI", sans-serif;
+  background: #f9fafb;
+  color: #111827;
+}
+
+#root {
+  min-height: 100vh;
+}

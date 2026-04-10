@@ -4,12 +4,16 @@ import 'react-flow-renderer/dist/style.css'
 import './App.css'
 import WorkflowGraph from './components/WorkflowGraph'
 import RightPanel from './components/RightPanel'
+import RequirementsPanel from './components/RequirementsPanel'
+import InsightsPanel from './components/InsightsPanel'
+import ExecutionSteps from './components/ExecutionSteps'
+import ParallelTasks from './components/ParallelTasks'
 import { getLayoutedNodes } from './utils/layout'
 
 /* ── API ─────────────────────────────────────────────── */
 const API_BASE_URL = 'http://127.0.0.1:8000'
 const API_TIMEOUT_MS = 90000
-const DEBUG_LOGS = true
+const DEBUG_LOGS = false
 
 const EMPTY_INSIGHTS = {
   critical_path: [],
@@ -156,11 +160,45 @@ async function fetchWorkflowProgressive(desc, setProgress, onPartialUpdate) {
   return normalizeWorkflow(finalPayload)
 }
 
-async function fetchWorkflow(desc, setProgress, onPartialUpdate) {
+async function fetchProjectWorkflow(desc, setProgress, onPartialUpdate) {
   try {
     const normalized = await fetchWorkflowProgressive(desc, setProgress, onPartialUpdate)
-    if (DEBUG_LOGS) console.log('[fetchWorkflow] normalized workflow:', normalized)
+    if (DEBUG_LOGS) console.log('[fetchProjectWorkflow] normalized workflow:', normalized)
     return normalized
+  } catch (e) {
+    if (e?.code === 'ECONNABORTED') {
+      console.error('[fetchProjectWorkflow] request timed out:', {
+        timeoutMs: API_TIMEOUT_MS,
+        message: e?.message,
+      })
+    }
+    console.error('[fetchProjectWorkflow] request failed:', {
+      message: e?.message,
+      code: e?.code,
+      status: e?.response?.status,
+      data: e?.response?.data,
+    })
+    throw e
+  }
+}
+
+async function fetchWorkflow(requirementsData) {
+  try {
+    if (DEBUG_LOGS) {
+      console.log('[fetchWorkflow] generating workflow from requirements:', requirementsData)
+    }
+
+    const response = await axios.post(
+      `${API_BASE_URL}/generate-workflow`,
+      { requirements_data: requirementsData },
+      { timeout: API_TIMEOUT_MS }
+    )
+
+    if (DEBUG_LOGS) {
+      console.log('[fetchWorkflow] /generate-workflow response:', response.data)
+    }
+
+    return response.data
   } catch (e) {
     if (e?.code === 'ECONNABORTED') {
       console.error('[fetchWorkflow] request timed out:', {
@@ -363,7 +401,7 @@ function TimelinePanel({ timelineRows, timelineDayCount, criticalPathLabels }) {
 /* ════════════════════════════════════════════════════════
    DASHBOARD
    ════════════════════════════════════════════════════════ */
-function Dashboard({ workflow, projectName, onBack, onRegenerate, loadingStage }) {
+function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading, workflowError, projectName, onBack, onRegenerate, loadingStage }) {
   const [viewMode, setViewMode]       = useState('graph')   // 'graph' | 'list' | 'timeline'
   const [selectedNode, setSelectedNode] = useState(null)
   const [activeTab, setActiveTab]     = useState('analysis')
@@ -414,12 +452,6 @@ function Dashboard({ workflow, projectName, onBack, onRegenerate, loadingStage }
   const criticalPathLabels = (safeInsights.critical_path || []).map((id) => nodeLabelMap[id] || id)
   const selectedNodeId = selectedNode?.id || null
 
-  useEffect(() => {
-    if (!DEBUG_LOGS) return
-    console.log('Nodes:', nodes)
-    console.log('Insights:', insights)
-  }, [nodes, insights])
-
   const flowNodes = useMemo(
     () =>
       nodes.map((n) => ({
@@ -439,6 +471,154 @@ function Dashboard({ workflow, projectName, onBack, onRegenerate, loadingStage }
       })),
     [nodes, selectedNodeId, criticalSet, bottleneckSet, parallelNodeSet]
   )
+
+  const apiWorkflowGraph = useMemo(() => {
+    const payload =
+      (workflowData && typeof workflowData === 'object' && workflowData.workflow && typeof workflowData.workflow === 'object')
+        ? workflowData.workflow
+        : workflowData
+
+    const rawNodes = Array.isArray(payload?.nodes) ? payload.nodes : []
+    const rawEdges = Array.isArray(payload?.edges) ? payload.edges : []
+    const rawOrder = Array.isArray(payload?.order) ? payload.order : []
+    const rawParallelGroups = Array.isArray(payload?.parallel_groups) ? payload.parallel_groups : []
+    const criticalPathIds = Array.isArray(payload?.critical_path)
+      ? payload.critical_path.map((id) => String(id))
+      : []
+    const bottleneckIds = Array.isArray(payload?.bottlenecks)
+      ? payload.bottlenecks
+          .map((item) => {
+            if (typeof item === 'string' || typeof item === 'number') {
+              return String(item)
+            }
+            if (item && typeof item === 'object') {
+              return String(item.id || item.node_id || '')
+            }
+            return ''
+          })
+          .filter(Boolean)
+      : []
+    const criticalPathSet = new Set(criticalPathIds)
+    const bottleneckSet = new Set(bottleneckIds)
+
+    const sanitizedNodes = rawNodes
+      .filter((n) => n && typeof n === 'object' && n.id !== undefined && n.id !== null)
+      .map((n, i) => {
+        const id = String(n.id || `n${i + 1}`)
+        const isCritical = criticalPathSet.has(id)
+        const isBottleneck = bottleneckSet.has(id)
+
+        return {
+          ...n,
+          id,
+          data: {
+            ...(n.data || {}),
+            is_bottleneck: Boolean((n.data && n.data.is_bottleneck) || isBottleneck),
+            warning_icon: isBottleneck,
+          },
+          style: {
+            ...(n.style || {}),
+            ...(isCritical
+              ? {
+                  backgroundColor: '#facc15',
+                  border: '3px solid #ca8a04',
+                }
+              : {}),
+            ...(isBottleneck && !isCritical
+              ? {
+                  border: '3px solid #dc2626',
+                }
+              : {}),
+            ...(isBottleneck && isCritical
+              ? {
+                  boxShadow: '0 0 0 2px #dc2626',
+                }
+              : {}),
+          },
+        }
+      })
+
+    const nodeIds = new Set(sanitizedNodes.map((n) => n.id))
+
+    const sanitizedEdges = rawEdges
+      .filter((e) => e && typeof e === 'object')
+      .map((e, i) => {
+        const source = String(e.source || e.from || '')
+        const target = String(e.target || e.to || '')
+        const isCriticalEdge = criticalPathSet.has(source) && criticalPathSet.has(target)
+
+        return {
+          ...e,
+          id: String(e.id || `e-${source}-${target}-${i}`),
+          source,
+          target,
+          style: {
+            ...(e.style || {}),
+            ...(isCriticalEdge
+              ? {
+                  stroke: '#f59e0b',
+                  strokeWidth: 4,
+                }
+              : {}),
+          },
+          markerEnd: isCriticalEdge
+            ? { type: 'arrowclosed', color: '#f59e0b' }
+            : e.markerEnd,
+        }
+      })
+      .filter((e) => e.source && e.target && nodeIds.has(e.source) && nodeIds.has(e.target))
+
+    const sanitizedOrder = rawOrder
+      .map((id) => String(id))
+      .filter((id) => nodeIds.has(id))
+
+    const sanitizedParallelGroups = rawParallelGroups
+      .filter((group) => Array.isArray(group))
+      .map((group) => group.map((id) => String(id)).filter((id) => nodeIds.has(id)))
+      .filter((group) => group.length > 0)
+
+    return {
+      nodes: sanitizedNodes,
+      edges: sanitizedEdges,
+      order: sanitizedOrder,
+      parallelGroups: sanitizedParallelGroups,
+    }
+  }, [workflowData])
+
+  const graphNodes = apiWorkflowGraph.nodes.length > 0 ? apiWorkflowGraph.nodes : flowNodes
+  const graphEdges = apiWorkflowGraph.edges.length > 0 ? apiWorkflowGraph.edges : edges
+  const executionOrder = apiWorkflowGraph.order.length > 0 ? apiWorkflowGraph.order : order
+  const parallelGroups = apiWorkflowGraph.parallelGroups || []
+  const executionNodeLabelMap = useMemo(() => {
+    const map = {}
+    graphNodes.forEach((node) => {
+      if (!node || node.id === undefined || node.id === null) return
+      const id = String(node.id)
+      const dataLabel = node.data?.label
+      map[id] = dataLabel || node.label || node.name || id
+    })
+    return map
+  }, [graphNodes])
+  const workflowInsights = useMemo(() => {
+    const payload =
+      (workflowData && typeof workflowData === 'object' && workflowData.workflow && typeof workflowData.workflow === 'object')
+        ? workflowData.workflow
+        : workflowData
+
+    return (payload?.insights && typeof payload.insights === 'object') ? payload.insights : null
+  }, [workflowData])
+  const flowStages = useMemo(() => {
+    const hasRequirements = Boolean(requirementsData)
+    const hasWorkflowOutput = graphNodes.length > 0
+    const hasInsights = Boolean(workflowInsights)
+
+    return [
+      { key: 'input', label: 'Input', done: Boolean(projectName), loading: false },
+      { key: 'requirements', label: 'Requirements', done: hasRequirements, loading: !hasRequirements && isWorkflowLoading },
+      { key: 'workflow', label: 'Workflow', done: hasWorkflowOutput, loading: isWorkflowLoading },
+      { key: 'insights', label: 'Insights', done: hasInsights, loading: !hasInsights && isWorkflowLoading },
+    ]
+  }, [projectName, requirementsData, graphNodes, workflowInsights, isWorkflowLoading])
 
   async function handleRegenerate() {
     if (isLoading) return
@@ -544,6 +724,45 @@ function Dashboard({ workflow, projectName, onBack, onRegenerate, loadingStage }
         {/* ── Center Content ── */}
         <div className="dashboard-main">
 
+          <div className="dashboard-section-wrap">
+            <div className="expl-banner">
+              <p className="expl-label">Pipeline Status</p>
+              <p className="expl-text">
+                {flowStages.map((stage) => {
+                  if (stage.done) return `${stage.label}: done`
+                  if (stage.loading) return `${stage.label}: loading`
+                  return `${stage.label}: waiting`
+                }).join(' | ')}
+              </p>
+            </div>
+          </div>
+
+          <div className="dashboard-section-wrap">
+            <RequirementsPanel requirementsData={requirementsData} isLoading={!requirementsData && isWorkflowLoading} />
+          </div>
+
+          <div className="dashboard-section-wrap">
+            <InsightsPanel insights={workflowInsights} isLoading={isWorkflowLoading} />
+          </div>
+
+          {isWorkflowLoading && (
+            <div className="dashboard-section-wrap">
+              <div className="expl-banner">
+                <p className="expl-label">Workflow Generation</p>
+                <p className="expl-text">Generating graph from requirements...</p>
+              </div>
+            </div>
+          )}
+
+          {workflowError && (
+            <div className="dashboard-section-wrap">
+              <div className="expl-banner" style={{ borderColor: '#fecaca', background: '#fef2f2' }}>
+                <p className="expl-label" style={{ color: '#b91c1c' }}>Workflow Generation Error</p>
+                <p className="expl-text" style={{ color: '#7f1d1d' }}>{workflowError}</p>
+              </div>
+            </div>
+          )}
+
           {/* Explanation banner */}
           {explanation && (
             <div className="dashboard-section-wrap">
@@ -588,11 +807,11 @@ function Dashboard({ workflow, projectName, onBack, onRegenerate, loadingStage }
             <div className="canvas-area canvas-area--spaced">
               <div className="canvas-grid" />
               <WorkflowGraph
-                nodes={flowNodes}
-                edges={edges}
+                nodes={graphNodes}
+                edges={graphEdges}
                 insights={safeInsights}
+                isLoading={isWorkflowLoading}
                 onNodeClick={(_, n) => {
-                  console.log('Clicked node:', n)
                   setSelectedNode(n)
                 }}
               />
@@ -649,18 +868,19 @@ function Dashboard({ workflow, projectName, onBack, onRegenerate, loadingStage }
 
               {/* Execution steps */}
               <div className="steps-wrap steps-wrap--tight">
-                <div className="steps-card">
-                  <p className="steps-title">Execution Order</p>
-                  <p className="steps-sub">Step-by-step sequence for completing the workflow.</p>
-                  <ol className="steps-list">
-                    {order.map((id, idx) => (
-                      <li key={`${id}-${idx}`} className="steps-item">
-                        <span className="steps-num">{idx + 1}</span>
-                        <span className="steps-name">{nodeLabelMap[id] || id}</span>
-                      </li>
-                    ))}
-                  </ol>
-                </div>
+                <ExecutionSteps
+                  order={executionOrder}
+                  nodeLabelMap={executionNodeLabelMap}
+                  isLoading={isWorkflowLoading}
+                />
+              </div>
+
+              <div className="steps-wrap steps-wrap--tight">
+                <ParallelTasks
+                  parallelGroups={parallelGroups}
+                  nodeLabelMap={executionNodeLabelMap}
+                  isLoading={isWorkflowLoading}
+                />
               </div>
             </div>
           )}
@@ -732,29 +952,22 @@ function TBar({ row }) {
    ════════════════════════════════════════════════════════ */
 export default function App() {
   const [workflow,    setWorkflow]    = useState(null)
+  const [requirementsData, setRequirementsData] = useState(null)
+  const [workflowData, setWorkflowData] = useState(null)
+  const [isWorkflowLoading, setIsWorkflowLoading] = useState(false)
+  const [workflowError, setWorkflowError] = useState('')
   const [projectName, setProjectName] = useState('')
   const [loadingStage, setLoadingStage] = useState('')
   const requestInFlightRef = useRef(false)
-  const lastWorkflowLogRef = useRef('')
-
-  useEffect(() => {
-    if (!DEBUG_LOGS || !workflow) return
-    const key = `${workflow.nodes?.length || 0}-${workflow.edges?.length || 0}-${workflow.order?.length || 0}-${projectName}`
-    if (lastWorkflowLogRef.current === key) return
-    lastWorkflowLogRef.current = key
-    console.log('[App] workflow state update:', {
-      nodes: workflow.nodes?.length || 0,
-      edges: workflow.edges?.length || 0,
-      order: workflow.order?.length || 0,
-      projectName,
-    })
-  }, [workflow, projectName])
+  const lastRequirementsKeyRef = useRef('')
 
   async function handleGenerate(idea) {
     if (requestInFlightRef.current) return null
     requestInFlightRef.current = true
+    setWorkflowError('')
+    setWorkflowData(null)
     try {
-      const wf = await fetchWorkflow(
+      const wf = await fetchProjectWorkflow(
         idea,
         setLoadingStage,
         (partial) => {
@@ -783,9 +996,10 @@ export default function App() {
     const idea = String(ideaOverride || projectName || '').trim()
     if (!idea) return null
     requestInFlightRef.current = true
-    if (DEBUG_LOGS) console.log('[App] regenerate trigger:', { idea })
+    setWorkflowError('')
+    setWorkflowData(null)
     try {
-      const wf = await fetchWorkflow(
+      const wf = await fetchProjectWorkflow(
         idea,
         setLoadingStage,
         (partial) => {
@@ -808,6 +1022,71 @@ export default function App() {
     }
   }
 
+  useEffect(() => {
+    const extractedRequirements =
+      workflow?.requirements_data ||
+      workflow?.requirementsData ||
+      workflow?.requirements_bundle ||
+      workflow?.requirements ||
+      null
+
+    if (!extractedRequirements) {
+      setRequirementsData(null)
+      return
+    }
+
+    const key = JSON.stringify(extractedRequirements)
+    if (lastRequirementsKeyRef.current === key) return
+    lastRequirementsKeyRef.current = key
+    setRequirementsData(extractedRequirements)
+  }, [workflow])
+
+  useEffect(() => {
+    if (!requirementsData) return
+
+    let cancelled = false
+
+    async function generateWorkflowFromRequirements() {
+      setIsWorkflowLoading(true)
+      setWorkflowError('')
+
+      try {
+        const generatedWorkflow = await fetchWorkflow(requirementsData)
+        if (!cancelled) {
+          setWorkflowData(generatedWorkflow)
+        }
+      } catch (e) {
+        if (!cancelled) {
+          const message =
+            e?.code === 'ECONNABORTED'
+              ? 'Workflow generation timed out. Please try again.'
+              : 'Failed to generate workflow from requirements.'
+          setWorkflowError(message)
+          console.error('[App] workflow generation from requirements failed:', e)
+        }
+      } finally {
+        if (!cancelled) {
+          setIsWorkflowLoading(false)
+        }
+      }
+    }
+
+    generateWorkflowFromRequirements()
+
+    return () => {
+      cancelled = true
+    }
+  }, [requirementsData])
+
+  function handleBackToLanding() {
+    setWorkflow(null)
+    setWorkflowData(null)
+    setRequirementsData(null)
+    setWorkflowError('')
+    setLoadingStage('')
+    setProjectName('')
+  }
+
   if (!workflow) {
     return (
       <Landing
@@ -822,8 +1101,12 @@ export default function App() {
   return (
     <Dashboard
       workflow={workflow}
+      requirementsData={requirementsData}
+      workflowData={workflowData}
+      isWorkflowLoading={isWorkflowLoading}
+      workflowError={workflowError}
       projectName={projectName}
-      onBack={() => setWorkflow(null)}
+      onBack={handleBackToLanding}
       onRegenerate={handleRegenerate}
       loadingStage={loadingStage}
     />

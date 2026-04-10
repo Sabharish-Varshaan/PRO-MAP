@@ -2,8 +2,6 @@ import { useEffect, useMemo, useState } from 'react'
 import ReactFlow, { Background, Controls, MiniMap } from 'react-flow-renderer'
 import CustomNode from './CustomNode'
 
-const NODE_TYPES = { task: CustomNode }
-
 const EDGE_STYLE = {
   type: 'smoothstep',
   animated: true,
@@ -11,8 +9,9 @@ const EDGE_STYLE = {
   markerEnd: { type: 'arrowclosed', color: '#94a3b8' },
 }
 
-export default function WorkflowGraph({ nodes, edges, insights, onNodeClick }) {
+export default function WorkflowGraph({ nodes, edges, insights, onNodeClick, isLoading = false }) {
   const [flowInstance, setFlowInstance] = useState(null)
+  const nodeTypes = useMemo(() => ({ task: CustomNode }), [])
   const criticalNodeSet = useMemo(() => new Set(insights?.critical_path || []), [insights])
 
   const safeNodes = useMemo(() => {
@@ -68,10 +67,24 @@ export default function WorkflowGraph({ nodes, edges, insights, onNodeClick }) {
 
   return (
     <div className="canvas-flow-wrap">
+      {isLoading ? (
+        <div className="expl-banner" style={{ marginBottom: 12 }}>
+          <p className="expl-label">Workflow Graph</p>
+          <p className="expl-text">Loading graph...</p>
+        </div>
+      ) : null}
+
+      {!isLoading && safeNodes.length === 0 ? (
+        <div className="expl-banner" style={{ marginBottom: 12 }}>
+          <p className="expl-label">Workflow Graph</p>
+          <p className="expl-text">No graph data available yet.</p>
+        </div>
+      ) : null}
+
       <ReactFlow
         nodes={safeNodes}
         edges={safeEdges}
-        nodeTypes={NODE_TYPES}
+        nodeTypes={nodeTypes}
         fitView
         fitViewOptions={{ padding: 0.2 }}
         style={{ height: '100%', width: '100%' }}

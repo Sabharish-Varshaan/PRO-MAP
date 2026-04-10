@@ -1,26 +1,26 @@
-function ExecutionSteps({ order, nodeLabelMap }) {
+function ExecutionSteps({ order = [], nodeLabelMap = {}, isLoading = false }) {
   return (
-    <section className="card steps-card">
-      <div className="steps-card__header">
-        <h2>Execution Order</h2>
-        <p>Step-by-step sequence for completing the workflow.</p>
-      </div>
+    <div className="steps-card">
+      <p className="steps-title">Execution Order</p>
+      <p className="steps-sub">Step-by-step sequence for completing the workflow.</p>
 
-      {order.length > 0 ? (
+      {isLoading ? (
+        <p className="steps-sub">Loading execution order...</p>
+      ) : order.length > 0 ? (
         <ol className="steps-list">
-          {order.map((nodeId, index) => (
-            <li key={`${nodeId}-${index}`} className="steps-list__item">
-              <span className="steps-list__index">{index + 1}</span>
-              <span className="steps-list__label">
-                {nodeLabelMap[nodeId] || nodeId}
-              </span>
-            </li>
-          ))}
+          {order.map((nodeId, index) => {
+            const id = String(nodeId)
+            return (
+              <li key={`${id}-${index}`} className="steps-item">
+                <span className="steps-name">Step {index + 1} -&gt; {nodeLabelMap[id] || id}</span>
+              </li>
+            )
+          })}
         </ol>
       ) : (
-        <p className="steps-card__empty">Generate a workflow to view execution steps.</p>
+        <p className="steps-sub">No execution order available.</p>
       )}
-    </section>
+    </div>
   )
 }
 

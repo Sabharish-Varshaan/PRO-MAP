@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
+import { Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import 'react-flow-renderer/dist/style.css'
 import './App.css'
 import WorkflowGraph from './components/WorkflowGraph'
@@ -8,12 +9,21 @@ import RequirementsPanel from './components/RequirementsPanel'
 import InsightsPanel from './components/InsightsPanel'
 import ExecutionSteps from './components/ExecutionSteps'
 import ParallelTasks from './components/ParallelTasks'
+import Timeline from './components/Timeline'
+import ErrorBoundary from './components/ErrorBoundary'
+import AppLayout from './components/AppLayout'
+import Login from './pages/Login'
+import Signup from './pages/Signup'
+import Onboarding from './pages/Onboarding'
+import { useAppStore } from './store/useAppStore'
+import { gatherRequirements, getProject, listProjects } from './utils/api'
 import { getLayoutedNodes } from './utils/layout'
 
 /* ── API ─────────────────────────────────────────────── */
 const API_BASE_URL = 'http://127.0.0.1:8000'
 const API_TIMEOUT_MS = 90000
 const DEBUG_LOGS = false
+const AUTH_TOKEN_KEY = 'promap_auth_token'
 
 const EMPTY_INSIGHTS = {
   critical_path: [],
@@ -22,6 +32,23 @@ const EMPTY_INSIGHTS = {
   start_task: '',
   end_task: '',
   explanation: '',
+}
+
+function authHeaders(token) {
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+function saveAuthToken(token) {
+  if (!token) return
+  localStorage.setItem(AUTH_TOKEN_KEY, token)
+}
+
+function loadAuthToken() {
+  return localStorage.getItem(AUTH_TOKEN_KEY) || ''
+}
+
+function clearAuthToken() {
+  localStorage.removeItem(AUTH_TOKEN_KEY)
 }
 
 /* ── Normalize backend response ──────────────────────── */
@@ -94,6 +121,7 @@ function normalizeWorkflow(raw) {
     nodes, edges,
     order:       order.length > 0 ? order : nodes.map((n) => n.id),
     explanation: payload?.explanation?.trim?.() || payload?.insights?.explanation?.trim?.() || '',
+    requirements: (payload?.requirements && typeof payload.requirements === 'object') ? payload.requirements : {},
     insights: (payload?.insights && typeof payload.insights === 'object')
       ? {
           critical_path: Array.isArray(payload.insights.critical_path)
@@ -115,13 +143,20 @@ function normalizeWorkflow(raw) {
   }
 }
 
-async function fetchWorkflowProgressive(desc, setProgress, onPartialUpdate) {
+async function fetchWorkflowProgressive(desc, requirements, projectId, token, setProgress, onPartialUpdate) {
   setProgress('Generating tasks...')
   const tasksRes = await axios.post(
     `${API_BASE_URL}/generate-tasks`,
-    { project_description: desc },
-    { timeout: API_TIMEOUT_MS }
+    { description: desc, requirements, project_id: projectId },
+    { timeout: API_TIMEOUT_MS, headers: authHeaders(token) }
   )
+  console.log('STEP DATA:', {
+    step: 'app-generate-tasks',
+    projectId,
+    resolvedProjectId: tasksRes.data?.project_id,
+    tasks: tasksRes.data?.tasks,
+  })
+  const resolvedProjectId = Number(tasksRes.data?.project_id || projectId || 0)
   const tasksPayload = { tasks: tasksRes.data?.tasks || [] }
   const taskOnly = normalizeWorkflow(tasksPayload)
   if (typeof onPartialUpdate === 'function') {
@@ -131,9 +166,16 @@ async function fetchWorkflowProgressive(desc, setProgress, onPartialUpdate) {
   setProgress('Building workflow...')
   const graphRes = await axios.post(
     `${API_BASE_URL}/build-graph`,
-    { tasks: tasksPayload.tasks },
-    { timeout: API_TIMEOUT_MS }
+    { project_id: resolvedProjectId, tasks: tasksPayload.tasks },
+    { timeout: API_TIMEOUT_MS, headers: authHeaders(token) }
   )
+  console.log('STEP DATA:', {
+    step: 'app-build-graph',
+    projectId: resolvedProjectId,
+    nodes: graphRes.data?.nodes,
+    edges: graphRes.data?.edges,
+    order: graphRes.data?.order,
+  })
   const graphPayload = {
     nodes: graphRes.data?.nodes || [],
     edges: graphRes.data?.edges || [],
@@ -144,12 +186,17 @@ async function fetchWorkflowProgressive(desc, setProgress, onPartialUpdate) {
     onPartialUpdate(graphOnly)
   }
 
-  setProgress('Analyzing dependencies...')
+  setProgress('Analyzing...')
   const insightsRes = await axios.post(
     `${API_BASE_URL}/analyze-workflow`,
-    { nodes: graphPayload.nodes, edges: graphPayload.edges },
-    { timeout: API_TIMEOUT_MS }
+    { project_id: resolvedProjectId, nodes: graphPayload.nodes, edges: graphPayload.edges },
+    { timeout: API_TIMEOUT_MS, headers: authHeaders(token) }
   )
+  console.log('STEP DATA:', {
+    step: 'app-analyze-workflow',
+    projectId: resolvedProjectId,
+    insights: insightsRes.data?.insights,
+  })
 
   const finalPayload = {
     ...graphPayload,
@@ -157,14 +204,26 @@ async function fetchWorkflowProgressive(desc, setProgress, onPartialUpdate) {
     explanation: insightsRes.data?.insights?.explanation || '',
   }
 
-  return normalizeWorkflow(finalPayload)
+  console.log('STEP DATA:', {
+    step: 'app-combine-workflow',
+    hasNodes: Array.isArray(finalPayload.nodes) && finalPayload.nodes.length > 0,
+    hasEdges: Array.isArray(finalPayload.edges) && finalPayload.edges.length > 0,
+    hasInsights: Boolean(finalPayload.insights),
+    finalPayload,
+  })
+
+  return {
+    projectId: resolvedProjectId,
+    workflow: normalizeWorkflow(finalPayload),
+    raw: finalPayload,
+  }
 }
 
-async function fetchProjectWorkflow(desc, setProgress, onPartialUpdate) {
+async function fetchProjectWorkflow(desc, requirements, projectId, token, setProgress, onPartialUpdate) {
   try {
-    const normalized = await fetchWorkflowProgressive(desc, setProgress, onPartialUpdate)
-    if (DEBUG_LOGS) console.log('[fetchProjectWorkflow] normalized workflow:', normalized)
-    return normalized
+    const result = await fetchWorkflowProgressive(desc, requirements, projectId, token, setProgress, onPartialUpdate)
+    if (DEBUG_LOGS) console.log('[fetchProjectWorkflow] normalized workflow:', result)
+    return result
   } catch (e) {
     if (e?.code === 'ECONNABORTED') {
       console.error('[fetchProjectWorkflow] request timed out:', {
@@ -182,38 +241,116 @@ async function fetchProjectWorkflow(desc, setProgress, onPartialUpdate) {
   }
 }
 
-async function fetchWorkflow(requirementsData) {
-  try {
-    if (DEBUG_LOGS) {
-      console.log('[fetchWorkflow] generating workflow from requirements:', requirementsData)
+function AuthScreen({ onAuthenticated }) {
+  const [mode, setMode] = useState('login')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  async function submit() {
+    if (loading) return
+    if (!email.trim() || !password.trim()) {
+      setError('Email and password are required.')
+      return
     }
 
-    const response = await axios.post(
-      `${API_BASE_URL}/generate-workflow`,
-      { requirements_data: requirementsData },
-      { timeout: API_TIMEOUT_MS }
-    )
-
-    if (DEBUG_LOGS) {
-      console.log('[fetchWorkflow] /generate-workflow response:', response.data)
+    setLoading(true)
+    setError('')
+    try {
+      const endpoint = mode === 'login' ? '/login' : '/signup'
+      const res = await axios.post(
+        `${API_BASE_URL}${endpoint}`,
+        { email: email.trim(), password },
+        { timeout: API_TIMEOUT_MS }
+      )
+      const token = String(res.data?.token || '')
+      const user = res.data?.user || null
+      if (!token || !user) {
+        throw new Error('Invalid auth response')
+      }
+      saveAuthToken(token)
+      onAuthenticated({ token, user })
+    } catch (e) {
+      const msg = e?.response?.data?.detail || e?.message || 'Authentication failed'
+      setError(String(msg))
+    } finally {
+      setLoading(false)
     }
-
-    return response.data
-  } catch (e) {
-    if (e?.code === 'ECONNABORTED') {
-      console.error('[fetchWorkflow] request timed out:', {
-        timeoutMs: API_TIMEOUT_MS,
-        message: e?.message,
-      })
-    }
-    console.error('[fetchWorkflow] request failed:', {
-      message: e?.message,
-      code: e?.code,
-      status: e?.response?.status,
-      data: e?.response?.data,
-    })
-    throw e
   }
+
+  return (
+    <div className="landing">
+      <div className="landing-hero" style={{ maxWidth: 520 }}>
+        <p className="hero-eyebrow">Secure Access</p>
+        <h1 className="hero-title">{mode === 'login' ? 'Login to PROMAP' : 'Create your account'}</h1>
+        <p className="hero-sub">Authenticate to save projects, cache workflow results, and continue where you left off.</p>
+        <div className="hero-input-wrap" style={{ display: 'grid', gap: 12 }}>
+          <input className="hero-input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
+          <input className="hero-input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" />
+          <button className="hero-btn" onClick={submit} disabled={loading}>
+            {loading ? 'Please wait...' : mode === 'login' ? 'Login' : 'Sign up'}
+          </button>
+          {error ? <p className="hero-error-text">{error}</p> : null}
+          <button
+            className="view-tab"
+            onClick={() => setMode((prev) => (prev === 'login' ? 'signup' : 'login'))}
+            disabled={loading}
+          >
+            {mode === 'login' ? 'Need an account? Sign up' : 'Already have an account? Login'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function QuestionsScreen({ description, questions, progressText, loading, onBack, onSubmit }) {
+  const [answers, setAnswers] = useState({})
+
+  function setAnswer(question, value) {
+    setAnswers((prev) => ({ ...prev, [question]: value }))
+  }
+
+  async function handleSubmit() {
+    const missing = questions.some((q) => !String(answers[q] || '').trim())
+    if (missing) return
+    await onSubmit(answers)
+  }
+
+  return (
+    <div className="landing">
+      <div className="landing-hero" style={{ maxWidth: 760 }}>
+        <p className="hero-eyebrow">Personalized Onboarding</p>
+        <h1 className="hero-title">Answer a few focused questions</h1>
+        <p className="hero-sub">Project: {description}</p>
+
+        <div style={{ display: 'grid', gap: 14, marginTop: 14 }}>
+          {questions.map((q) => (
+            <label key={q} style={{ display: 'grid', gap: 8, textAlign: 'left' }}>
+              <span style={{ fontWeight: 700 }}>{q}</span>
+              <textarea
+                className="hero-input"
+                rows={3}
+                value={answers[q] || ''}
+                onChange={(e) => setAnswer(q, e.target.value)}
+                placeholder="Type your answer"
+              />
+            </label>
+          ))}
+        </div>
+
+        {progressText ? <p className="hero-progress-text">{progressText}</p> : null}
+
+        <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
+          <button className="view-tab" onClick={onBack} disabled={loading}>Back</button>
+          <button className="hero-btn" onClick={handleSubmit} disabled={loading}>
+            {loading ? 'Building workflow...' : 'Submit & Build Workflow'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 /* ── Priority helpers ────────────────────────────────── */
@@ -221,6 +358,20 @@ const PRIORITY_DOT = { High: '#f59e0b', Medium: '#3b82f6', Low: '#64748b' }
 
 function PBadge({ p }) {
   return <span className={`pbadge pbadge--${p || 'Medium'}`}>{p || 'Medium'}</span>
+}
+
+function TaskList({ nodes = [] }) {
+  const safeNodes = Array.isArray(nodes) ? nodes : []
+
+  return (
+    <ul className="simple-task-list">
+      {safeNodes.map((n, index) => {
+        const id = String(n?.id || `n${index + 1}`)
+        const label = n?.data?.label || n?.label || id
+        return <li key={id}>{label}</li>
+      })}
+    </ul>
+  )
 }
 
 /* ── Gantt row estimates (backend doesn't send hours, so we distribute) ── */
@@ -361,51 +512,26 @@ function Landing({ onGenerate, progressText }) {
   )
 }
 
-function TimelinePanel({ timelineRows, timelineDayCount, criticalPathLabels }) {
-  const timelineColumns = `220px repeat(${timelineDayCount}, minmax(120px, 1fr))`
-
-  return (
-    <div className="timeline-shell">
-      <h3 className="timeline-title">Execution Timeline</h3>
-      <div className="timeline-wrap">
-        <div className="timeline-header-row" style={{ gridTemplateColumns: timelineColumns }}>
-          <div className="timeline-day timeline-day--label">Task</div>
-          {Array.from({ length: timelineDayCount }, (_, i) => (
-            <div key={`timeline-day-${i + 1}`} className="timeline-day">Day {i + 1}</div>
-          ))}
-        </div>
-
-        {timelineRows.map((row) => (
-          <div
-            key={row.id}
-            className={`timeline-task-row${row.isCritical ? ' timeline-task-row--critical' : ''}`}
-            style={{ gridTemplateColumns: timelineColumns }}
-          >
-            <div className="timeline-label">{row.label}</div>
-            <TBar row={row} />
-          </div>
-        ))}
-
-        <div className="timeline-legend">
-          <span className="timeline-legend-item timeline-legend-item--critical">■ Critical</span>
-          <span className="timeline-legend-item timeline-legend-item--high">■ High</span>
-          <span className="timeline-legend-item timeline-legend-item--medium">■ Medium</span>
-          <span className="timeline-legend-item timeline-legend-item--parallel">■ Parallel</span>
-        </div>
-        <p className="timeline-legend-path">Critical path: {criticalPathLabels.join(' -> ') || '—'}</p>
-      </div>
-    </div>
-  )
-}
-
 /* ════════════════════════════════════════════════════════
    DASHBOARD
    ════════════════════════════════════════════════════════ */
-function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading, workflowError, projectName, onBack, onRegenerate, loadingStage }) {
-  const [viewMode, setViewMode]       = useState('graph')   // 'graph' | 'list' | 'timeline'
+function Dashboard({ workflow, requirementsData, isWorkflowLoading, workflowError, projectName, onBack, onRegenerate, loadingStage }) {
+  const [view, setView] = useState('graph')
   const [selectedNode, setSelectedNode] = useState(null)
   const [activeTab, setActiveTab]     = useState('analysis')
   const [isLoading, setIsLoading]     = useState(false)
+
+  useEffect(() => {
+    console.log('WORKFLOW STATE:', workflow)
+    console.log('STEP DATA:', {
+      step: 'dashboard-received-workflow',
+      workflow,
+      nodes: workflow?.nodes,
+      edges: workflow?.edges,
+      insights: workflow?.insights,
+      requirements: workflow?.requirements,
+    })
+  }, [workflow])
 
   const hasWorkflow = Boolean(workflow && Array.isArray(workflow.nodes))
   const { rawNodes, edges, order, explanation, insights } = useMemo(() => {
@@ -415,16 +541,24 @@ function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading
         edges: [],
         order: [],
         explanation: '',
-        insights: null,
+        insights: EMPTY_INSIGHTS,
       }
     }
 
+    const safeNodes = Array.isArray(workflow.nodes)
+      ? workflow.nodes.map((node, index) => ({
+          ...node,
+          id: String(node?.id || `n${index + 1}`),
+          position: node?.position || { x: 0, y: 0 },
+        }))
+      : []
+
     return {
-      rawNodes: workflow.nodes,
+      rawNodes: safeNodes,
       edges: Array.isArray(workflow.edges) ? workflow.edges : [],
       order: Array.isArray(workflow.order) ? workflow.order : [],
       explanation: workflow.explanation || '',
-      insights: workflow.insights || null,
+      insights: workflow.insights || EMPTY_INSIGHTS,
     }
   }, [hasWorkflow, workflow])
 
@@ -472,123 +606,10 @@ function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading
     [nodes, selectedNodeId, criticalSet, bottleneckSet, parallelNodeSet]
   )
 
-  const apiWorkflowGraph = useMemo(() => {
-    const payload =
-      (workflowData && typeof workflowData === 'object' && workflowData.workflow && typeof workflowData.workflow === 'object')
-        ? workflowData.workflow
-        : workflowData
-
-    const rawNodes = Array.isArray(payload?.nodes) ? payload.nodes : []
-    const rawEdges = Array.isArray(payload?.edges) ? payload.edges : []
-    const rawOrder = Array.isArray(payload?.order) ? payload.order : []
-    const rawParallelGroups = Array.isArray(payload?.parallel_groups) ? payload.parallel_groups : []
-    const criticalPathIds = Array.isArray(payload?.critical_path)
-      ? payload.critical_path.map((id) => String(id))
-      : []
-    const bottleneckIds = Array.isArray(payload?.bottlenecks)
-      ? payload.bottlenecks
-          .map((item) => {
-            if (typeof item === 'string' || typeof item === 'number') {
-              return String(item)
-            }
-            if (item && typeof item === 'object') {
-              return String(item.id || item.node_id || '')
-            }
-            return ''
-          })
-          .filter(Boolean)
-      : []
-    const criticalPathSet = new Set(criticalPathIds)
-    const bottleneckSet = new Set(bottleneckIds)
-
-    const sanitizedNodes = rawNodes
-      .filter((n) => n && typeof n === 'object' && n.id !== undefined && n.id !== null)
-      .map((n, i) => {
-        const id = String(n.id || `n${i + 1}`)
-        const isCritical = criticalPathSet.has(id)
-        const isBottleneck = bottleneckSet.has(id)
-
-        return {
-          ...n,
-          id,
-          data: {
-            ...(n.data || {}),
-            is_bottleneck: Boolean((n.data && n.data.is_bottleneck) || isBottleneck),
-            warning_icon: isBottleneck,
-          },
-          style: {
-            ...(n.style || {}),
-            ...(isCritical
-              ? {
-                  backgroundColor: '#facc15',
-                  border: '3px solid #ca8a04',
-                }
-              : {}),
-            ...(isBottleneck && !isCritical
-              ? {
-                  border: '3px solid #dc2626',
-                }
-              : {}),
-            ...(isBottleneck && isCritical
-              ? {
-                  boxShadow: '0 0 0 2px #dc2626',
-                }
-              : {}),
-          },
-        }
-      })
-
-    const nodeIds = new Set(sanitizedNodes.map((n) => n.id))
-
-    const sanitizedEdges = rawEdges
-      .filter((e) => e && typeof e === 'object')
-      .map((e, i) => {
-        const source = String(e.source || e.from || '')
-        const target = String(e.target || e.to || '')
-        const isCriticalEdge = criticalPathSet.has(source) && criticalPathSet.has(target)
-
-        return {
-          ...e,
-          id: String(e.id || `e-${source}-${target}-${i}`),
-          source,
-          target,
-          style: {
-            ...(e.style || {}),
-            ...(isCriticalEdge
-              ? {
-                  stroke: '#f59e0b',
-                  strokeWidth: 4,
-                }
-              : {}),
-          },
-          markerEnd: isCriticalEdge
-            ? { type: 'arrowclosed', color: '#f59e0b' }
-            : e.markerEnd,
-        }
-      })
-      .filter((e) => e.source && e.target && nodeIds.has(e.source) && nodeIds.has(e.target))
-
-    const sanitizedOrder = rawOrder
-      .map((id) => String(id))
-      .filter((id) => nodeIds.has(id))
-
-    const sanitizedParallelGroups = rawParallelGroups
-      .filter((group) => Array.isArray(group))
-      .map((group) => group.map((id) => String(id)).filter((id) => nodeIds.has(id)))
-      .filter((group) => group.length > 0)
-
-    return {
-      nodes: sanitizedNodes,
-      edges: sanitizedEdges,
-      order: sanitizedOrder,
-      parallelGroups: sanitizedParallelGroups,
-    }
-  }, [workflowData])
-
-  const graphNodes = apiWorkflowGraph.nodes.length > 0 ? apiWorkflowGraph.nodes : flowNodes
-  const graphEdges = apiWorkflowGraph.edges.length > 0 ? apiWorkflowGraph.edges : edges
-  const executionOrder = apiWorkflowGraph.order.length > 0 ? apiWorkflowGraph.order : order
-  const parallelGroups = apiWorkflowGraph.parallelGroups || []
+  const graphNodes = flowNodes
+  const graphEdges = edges
+  const executionOrder = order
+  const parallelGroups = safeInsights.parallel_groups || []
   const executionNodeLabelMap = useMemo(() => {
     const map = {}
     graphNodes.forEach((node) => {
@@ -599,14 +620,7 @@ function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading
     })
     return map
   }, [graphNodes])
-  const workflowInsights = useMemo(() => {
-    const payload =
-      (workflowData && typeof workflowData === 'object' && workflowData.workflow && typeof workflowData.workflow === 'object')
-        ? workflowData.workflow
-        : workflowData
-
-    return (payload?.insights && typeof payload.insights === 'object') ? payload.insights : null
-  }, [workflowData])
+  const workflowInsights = safeInsights
   const flowStages = useMemo(() => {
     const hasRequirements = Boolean(requirementsData)
     const hasWorkflowOutput = graphNodes.length > 0
@@ -626,7 +640,7 @@ function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading
     try {
       setSelectedNode(null)
       setActiveTab('analysis')
-      setViewMode('graph')
+      setView('graph')
       await onRegenerate(projectName)
     } catch (e) {
       console.error('[Dashboard] regenerate failed:', e)
@@ -635,7 +649,7 @@ function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading
     }
   }
 
-  if (!hasWorkflow) return null
+  if (!hasWorkflow) return <div>No graph data</div>
 
   return (
     <div className="dashboard app">
@@ -654,7 +668,7 @@ function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading
         <div className="topbar-spacer" />
         <div className="view-tabs">
           {['graph', 'list', 'timeline'].map((v) => (
-            <button key={v} className={`view-tab${viewMode === v ? ' active' : ''}`} onClick={() => setViewMode(v)}>
+            <button key={v} className={`view-tab${view === v ? ' active' : ''}`} onClick={() => setView(v)}>
               {v.charAt(0).toUpperCase() + v.slice(1)}
             </button>
           ))}
@@ -683,11 +697,11 @@ function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading
               { key: 'timeline', label: 'Timeline',    dot: '#9b9aaa' },
             ].map((item) => (
               <div key={item.key}
-                className={`sidebar-item${viewMode === item.key ? ' active' : ''}`}
-                onClick={() => setViewMode(item.key)}
+                className={`sidebar-item${view === item.key ? ' active' : ''}`}
+                onClick={() => setView(item.key)}
               >
                 <div className="sidebar-item-left">
-                  <div className="sidebar-dot" style={{ background: viewMode === item.key ? '#3b82f6' : item.dot }} />
+                  <div className="sidebar-dot" style={{ background: view === item.key ? '#3b82f6' : item.dot }} />
                   {item.label}
                 </div>
               </div>
@@ -737,12 +751,115 @@ function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading
             </div>
           </div>
 
+          {/* ── GRAPH VIEW ── */}
+          {view === 'graph' && workflow?.nodes?.length > 0 && (
+            <div className="canvas-area canvas-area--spaced">
+              <div className="canvas-grid" />
+              <WorkflowGraph
+                nodes={graphNodes}
+                edges={graphEdges}
+                insights={safeInsights}
+                isLoading={isWorkflowLoading}
+                onNodeClick={(_, n) => {
+                  setSelectedNode(n)
+                }}
+              />
+            </div>
+          )}
+
+          {/* ── LIST VIEW ── */}
+          {view === 'list' && workflow?.nodes?.length > 0 && (
+            <div className="list-view-wrap">
+              <div className="list-card">
+                <div className="list-card-header">
+                  <span className="list-card-title">List view</span>
+                  <span className="count-badge">{nodes.length} tasks</span>
+                  <div className="list-spacer" />
+                  <span className="list-hint">Topological order</span>
+                </div>
+                {nodes.length > 0 ? nodes.map((node, i) => {
+                  const incoming = edges.filter((e) => e.target === node.id)
+                  return (
+                    <div key={node.id} className="list-row" onClick={() => setSelectedNode(node)}>
+                      <span className="list-row-num">0{i + 1}</span>
+                      <div className="list-row-dot" style={{ background: PRIORITY_DOT[node.data?.priority] || '#f59e0b' }} />
+                      <span className="list-row-name">{node.data?.label}</span>
+                      <div className="mini-chips">
+                        {incoming.map((e) => (
+                          <span key={e.id} className="mini-chip mini-chip--blue">{nodeLabelMap[e.source]}</span>
+                        ))}
+                      </div>
+                      <PBadge p={node.data?.priority} />
+                      {node.data?.is_critical && <span className="mini-chip mini-chip--red">🔴 Critical</span>}
+                      {node.data?.is_bottleneck && <span className="mini-chip mini-chip--amber">⚠ Bottleneck</span>}
+                      {parallelNodeSet.has(node.id) && <span className="mini-chip mini-chip--par">‖ Parallel</span>}
+                    </div>
+                  )
+                }) : <TaskList nodes={graphNodes} />}
+              </div>
+
+              <div className="list-card list-card--timeline">
+                <div className="list-card-header">
+                  <span className="list-card-title">Timeline view</span>
+                  <span className="count-badge count-badge--timeline">
+                    {timelineRows.length} steps
+                  </span>
+                  <div className="list-spacer" />
+                  <span className="list-hint">Critical path: {criticalPathLabels.join(' → ') || '—'}</span>
+                </div>
+                <Timeline
+                  timelineRows={timelineRows}
+                  timelineDayCount={timelineDayCount}
+                  criticalPathLabels={criticalPathLabels}
+                />
+              </div>
+
+              <div className="steps-wrap steps-wrap--tight">
+                <ExecutionSteps
+                  order={executionOrder}
+                  nodeLabelMap={executionNodeLabelMap}
+                  isLoading={isWorkflowLoading}
+                />
+              </div>
+
+              <div className="steps-wrap steps-wrap--tight">
+                <ParallelTasks
+                  parallelGroups={parallelGroups}
+                  nodeLabelMap={executionNodeLabelMap}
+                  isLoading={isWorkflowLoading}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* ── TIMELINE VIEW ── */}
+          {view === 'timeline' && workflow?.nodes?.length > 0 && (
+            <div className="dashboard-section-wrap list-view-wrap">
+              <Timeline nodes={graphNodes} order={executionOrder} />
+            </div>
+          )}
+
+          {!workflow?.nodes?.length && (
+            <div className="dashboard-section-wrap">
+              <div>No workflow data available</div>
+            </div>
+          )}
+
+          {workflow?.nodes?.length > 0 && (
+            <div className="dashboard-section-wrap">
+              <details>
+                <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Workflow Debug JSON</summary>
+                <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', maxHeight: 260, overflow: 'auto' }}>{JSON.stringify(workflow, null, 2)}</pre>
+              </details>
+            </div>
+          )}
+
           <div className="dashboard-section-wrap">
             <RequirementsPanel requirementsData={requirementsData} isLoading={!requirementsData && isWorkflowLoading} />
           </div>
 
           <div className="dashboard-section-wrap">
-            <InsightsPanel insights={workflowInsights} isLoading={isWorkflowLoading} />
+            <InsightsPanel insights={workflowInsights} nodes={nodes} isLoading={isWorkflowLoading} />
           </div>
 
           {isWorkflowLoading && (
@@ -802,109 +919,6 @@ function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading
             </div>
           )}
 
-          {/* ── GRAPH VIEW ── */}
-          {viewMode === 'graph' && (
-            <div className="canvas-area canvas-area--spaced">
-              <div className="canvas-grid" />
-              <WorkflowGraph
-                nodes={graphNodes}
-                edges={graphEdges}
-                insights={safeInsights}
-                isLoading={isWorkflowLoading}
-                onNodeClick={(_, n) => {
-                  setSelectedNode(n)
-                }}
-              />
-            </div>
-          )}
-
-          {/* ── LIST VIEW ── */}
-          {viewMode === 'list' && (
-            <div className="list-view-wrap">
-              <div className="list-card">
-                <div className="list-card-header">
-                  <span className="list-card-title">List view</span>
-                  <span className="count-badge">{nodes.length} tasks</span>
-                  <div className="list-spacer" />
-                  <span className="list-hint">Topological order</span>
-                </div>
-                {nodes.map((node, i) => {
-                  const incoming = edges.filter((e) => e.target === node.id)
-                  return (
-                    <div key={node.id} className="list-row" onClick={() => setSelectedNode(node)}>
-                      <span className="list-row-num">0{i + 1}</span>
-                      <div className="list-row-dot" style={{ background: PRIORITY_DOT[node.data?.priority] || '#f59e0b' }} />
-                      <span className="list-row-name">{node.data?.label}</span>
-                      <div className="mini-chips">
-                        {incoming.map((e) => (
-                          <span key={e.id} className="mini-chip mini-chip--blue">{nodeLabelMap[e.source]}</span>
-                        ))}
-                      </div>
-                      <PBadge p={node.data?.priority} />
-                      {node.data?.is_critical && <span className="mini-chip mini-chip--red">🔴 Critical</span>}
-                      {node.data?.is_bottleneck && <span className="mini-chip mini-chip--amber">⚠ Bottleneck</span>}
-                      {parallelNodeSet.has(node.id) && <span className="mini-chip mini-chip--par">‖ Parallel</span>}
-                    </div>
-                  )
-                })}
-              </div>
-
-              {/* Timeline in list view too */}
-              <div className="list-card list-card--timeline">
-                <div className="list-card-header">
-                  <span className="list-card-title">Timeline view</span>
-                  <span className="count-badge count-badge--timeline">
-                    {timelineRows.length} steps
-                  </span>
-                  <div className="list-spacer" />
-                  <span className="list-hint">Critical path: {criticalPathLabels.join(' → ') || '—'}</span>
-                </div>
-                <TimelinePanel
-                  timelineRows={timelineRows}
-                  timelineDayCount={timelineDayCount}
-                  criticalPathLabels={criticalPathLabels}
-                />
-              </div>
-
-              {/* Execution steps */}
-              <div className="steps-wrap steps-wrap--tight">
-                <ExecutionSteps
-                  order={executionOrder}
-                  nodeLabelMap={executionNodeLabelMap}
-                  isLoading={isWorkflowLoading}
-                />
-              </div>
-
-              <div className="steps-wrap steps-wrap--tight">
-                <ParallelTasks
-                  parallelGroups={parallelGroups}
-                  nodeLabelMap={executionNodeLabelMap}
-                  isLoading={isWorkflowLoading}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* ── TIMELINE VIEW ── */}
-          {viewMode === 'timeline' && (
-            <div className="list-view-wrap">
-              <div className="list-card">
-                <div className="list-card-header">
-                  <span className="list-card-title">Timeline view</span>
-                  <span className="count-badge count-badge--timeline">
-                    {timelineRows.length} steps
-                  </span>
-                  <div className="list-spacer" />
-                  <span className="list-hint">Critical path: {criticalPathLabels.join(' → ') || '—'}</span>
-                </div>
-                <TimelinePanel
-                  timelineRows={timelineRows}
-                  timelineDayCount={timelineDayCount}
-                  criticalPathLabels={criticalPathLabels}
-                />
-              </div>
-            </div>
-          )}
         </div>
 
         <RightPanel
@@ -919,196 +933,482 @@ function Dashboard({ workflow, requirementsData, workflowData, isWorkflowLoading
   )
 }
 
-/* Gantt bar helper */
-function TBar({ row }) {
-  const colors = {
-    High: { bg: '#f59e0b', text: '#111827' },
-    Medium: { bg: '#3b82f6', text: '#ffffff' },
-    Low: { bg: '#64748b', text: '#ffffff' },
-    Parallel: { bg: '#10b981', text: '#ffffff' },
-    Critical: { bg: '#ef4444', text: '#ffffff' },
-  }
-
-  let c = colors[row.priority] || colors.Medium
-  if (row.parallel) c = colors.Parallel
-  if (row.isCritical) c = colors.Critical
-
-  return (
-    <div
-      className="timeline-bar"
-      style={{
-        gridColumn: `${row.start + 2} / span ${row.duration}`,
-        background: c.bg,
-        color: c.text,
-      }}
-    >
-      {`${row.step}. ${row.label}`}
-    </div>
-  )
-}
-
 /* ════════════════════════════════════════════════════════
    ROOT APP
    ════════════════════════════════════════════════════════ */
-export default function App() {
-  const [workflow,    setWorkflow]    = useState(null)
-  const [requirementsData, setRequirementsData] = useState(null)
-  const [workflowData, setWorkflowData] = useState(null)
-  const [isWorkflowLoading, setIsWorkflowLoading] = useState(false)
-  const [workflowError, setWorkflowError] = useState('')
-  const [projectName, setProjectName] = useState('')
-  const [loadingStage, setLoadingStage] = useState('')
-  const requestInFlightRef = useRef(false)
-  const lastRequirementsKeyRef = useRef('')
+function RequireAuth({ children }) {
+  const token = useAppStore((s) => s.token)
+  if (!token) return <Navigate to="/login" replace />
+  return children
+}
 
-  async function handleGenerate(idea) {
-    if (requestInFlightRef.current) return null
-    requestInFlightRef.current = true
-    setWorkflowError('')
-    setWorkflowData(null)
-    try {
-      const wf = await fetchProjectWorkflow(
-        idea,
-        setLoadingStage,
-        (partial) => {
-          setWorkflow((prev) => {
-            if (!prev) return partial
-            return {
-              ...prev,
-              ...partial,
-              insights: partial.insights || prev.insights || EMPTY_INSIGHTS,
-              explanation: partial.explanation || prev.explanation || '',
-            }
-          })
-        }
-      )
-      setWorkflow(wf)
-      setProjectName(idea || 'My Project')
-      return wf
-    } finally {
-      setLoadingStage('')
-      requestInFlightRef.current = false
-    }
-  }
+function ProtectedShell({ children, active = 'dashboard' }) {
+  const navigate = useNavigate()
+  const user = useAppStore((s) => s.user)
+  const logout = useAppStore((s) => s.logout)
 
-  async function handleRegenerate(ideaOverride) {
-    if (requestInFlightRef.current) return null
-    const idea = String(ideaOverride || projectName || '').trim()
-    if (!idea) return null
-    requestInFlightRef.current = true
-    setWorkflowError('')
-    setWorkflowData(null)
-    try {
-      const wf = await fetchProjectWorkflow(
-        idea,
-        setLoadingStage,
-        (partial) => {
-          setWorkflow((prev) => {
-            if (!prev) return partial
-            return {
-              ...prev,
-              ...partial,
-              insights: partial.insights || prev.insights || EMPTY_INSIGHTS,
-              explanation: partial.explanation || prev.explanation || '',
-            }
-          })
-        }
-      )
-      setWorkflow(wf)
-      return wf
-    } finally {
-      setLoadingStage('')
-      requestInFlightRef.current = false
-    }
-  }
+  const sidebar = (
+    <div className="shell-nav-list">
+      {[
+        { key: 'dashboard', label: 'Dashboard', to: '/' },
+        { key: 'projects', label: 'Projects', to: '/projects' },
+        { key: 'settings', label: 'Settings', to: '/dashboard' },
+      ].map((item) => (
+        <div
+          key={item.key}
+          className={`shell-nav-item${active === item.key ? ' active' : ''}`}
+          onClick={() => navigate(item.to)}
+        >
+          <span>{item.label}</span>
+          <span>›</span>
+        </div>
+      ))}
 
-  useEffect(() => {
-    const extractedRequirements =
-      workflow?.requirements_data ||
-      workflow?.requirementsData ||
-      workflow?.requirements_bundle ||
-      workflow?.requirements ||
-      null
+      <button
+        className="shell-logout"
+        onClick={() => {
+          logout()
+          navigate('/login')
+        }}
+      >
+        Logout
+      </button>
+    </div>
+  )
 
-    if (!extractedRequirements) {
-      setRequirementsData(null)
-      return
-    }
+  const topbar = (
+    <>
+      <div className="brand brand--clickable" onClick={() => navigate('/') }>
+        <div className="brand-logo">P</div>
+        <span className="brand-name">PROMAP</span>
+      </div>
+      <div className="topbar-spacer" />
+      <div className="breadcrumb">
+        <span>{user?.email || 'Signed in user'}</span>
+      </div>
+      <button
+        className="regen-btn"
+        onClick={() => {
+          logout()
+          navigate('/login')
+        }}
+      >
+        Logout
+      </button>
+    </>
+  )
 
-    const key = JSON.stringify(extractedRequirements)
-    if (lastRequirementsKeyRef.current === key) return
-    lastRequirementsKeyRef.current = key
-    setRequirementsData(extractedRequirements)
-  }, [workflow])
+  return (
+    <AppLayout sidebar={sidebar} topbar={topbar} className="protected-shell">
+      {children}
+    </AppLayout>
+  )
+}
+
+function ProjectsPage() {
+  const navigate = useNavigate()
+  const token = useAppStore((s) => s.token)
+  const setProjectName = useAppStore((s) => s.setProjectName)
+  const setProjectId = useAppStore((s) => s.setProjectId)
+  const setIdea = useAppStore((s) => s.setIdea)
+  const setQuestions = useAppStore((s) => s.setQuestions)
+  const setAnswers = useAppStore((s) => s.setAnswers)
+  const setWorkflow = useAppStore((s) => s.setWorkflow)
+  const setLoadingMessage = useAppStore((s) => s.setLoadingMessage)
+
+  const [projects, setProjects] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [openingId, setOpeningId] = useState(null)
 
   useEffect(() => {
-    if (!requirementsData) return
-
     let cancelled = false
 
-    async function generateWorkflowFromRequirements() {
-      setIsWorkflowLoading(true)
-      setWorkflowError('')
-
+    async function loadProjects() {
+      setLoading(true)
+      setError('')
       try {
-        const generatedWorkflow = await fetchWorkflow(requirementsData)
+        const data = await listProjects({ token })
         if (!cancelled) {
-          setWorkflowData(generatedWorkflow)
+          setProjects(Array.isArray(data) ? data : [])
         }
-      } catch (e) {
+      } catch (err) {
         if (!cancelled) {
-          const message =
-            e?.code === 'ECONNABORTED'
-              ? 'Workflow generation timed out. Please try again.'
-              : 'Failed to generate workflow from requirements.'
-          setWorkflowError(message)
-          console.error('[App] workflow generation from requirements failed:', e)
+          setError(err?.response?.data?.detail || err?.message || 'Failed to load projects.')
         }
       } finally {
         if (!cancelled) {
-          setIsWorkflowLoading(false)
+          setLoading(false)
         }
       }
     }
 
-    generateWorkflowFromRequirements()
-
+    loadProjects()
     return () => {
       cancelled = true
     }
-  }, [requirementsData])
+  }, [token])
 
-  function handleBackToLanding() {
-    setWorkflow(null)
-    setWorkflowData(null)
-    setRequirementsData(null)
-    setWorkflowError('')
-    setLoadingStage('')
-    setProjectName('')
-  }
+  async function openProject(projectId) {
+    setOpeningId(projectId)
+    setLoadingMessage('Loading saved project...')
+    setError('')
+    try {
+      const project = await getProject({ project_id: projectId, token })
+      const requirements = project.requirements || {}
+      const normalizedRequirements = { answers: requirements }
+      const graph = project.graph || {}
+      const nodes = Array.isArray(graph.nodes) ? graph.nodes : []
+      const edges = Array.isArray(graph.edges) ? graph.edges : []
+      const order = Array.isArray(graph.order) ? graph.order : []
+      const insights = project.insights || graph.insights || EMPTY_INSIGHTS
+      const storedQuestions = Array.isArray(requirements.follow_ups)
+        ? requirements.follow_ups
+            .map((item) => String(item?.question || '').trim())
+            .filter(Boolean)
+        : []
 
-  if (!workflow) {
-    return (
-      <Landing
-        progressText={loadingStage}
-        onGenerate={async (idea) => {
-          await handleGenerate(idea)
-        }}
-      />
-    )
+      setProjectId(project.id)
+      setProjectName(requirements.project_name || project.description || `Project ${project.id}`)
+      setIdea(project.description || requirements.description || '')
+      setAnswers(requirements)
+      setQuestions(storedQuestions)
+
+      if (nodes.length > 0) {
+        setWorkflow({ nodes, edges, order, insights, requirements: normalizedRequirements })
+        navigate('/dashboard')
+      } else {
+        setWorkflow(null)
+        navigate('/build')
+      }
+    } catch (err) {
+      setError(err?.response?.data?.detail || err?.message || 'Failed to open project.')
+    } finally {
+      setOpeningId(null)
+      setLoadingMessage('')
+    }
   }
 
   return (
-    <Dashboard
-      workflow={workflow}
-      requirementsData={requirementsData}
-      workflowData={workflowData}
-      isWorkflowLoading={isWorkflowLoading}
-      workflowError={workflowError}
-      projectName={projectName}
-      onBack={handleBackToLanding}
-      onRegenerate={handleRegenerate}
-      loadingStage={loadingStage}
-    />
+    <ProtectedShell active="projects">
+      <div className="page-wrap">
+        <div className="card" style={{ maxWidth: 1080, margin: '0 auto' }}>
+          <p className="section-kicker">Projects</p>
+          <h1 className="section-title">Open a saved project</h1>
+          <p className="section-subtitle">Click a project to refetch its exact stored graph, requirements, and insights from the database.</p>
+
+          {loading ? <p className="section-subtitle">Loading projects...</p> : null}
+          {error ? <p className="auth-error">{error}</p> : null}
+
+          <div className="projects-grid">
+            {projects.map((project) => (
+              <button
+                key={project.id}
+                type="button"
+                className="project-card"
+                onClick={() => openProject(project.id)}
+                disabled={openingId === project.id}
+              >
+                <div className="project-card__header">
+                  <div>
+                    <p className="project-card__title">{project.project_name || project.description || `Project ${project.id}`}</p>
+                    <p className="project-card__desc">{project.description}</p>
+                  </div>
+                  <span className={`project-pill ${project.has_graph ? 'project-pill--ready' : 'project-pill--draft'}`}>
+                    {project.has_graph ? 'Graph saved' : 'Draft'}
+                  </span>
+                </div>
+                <div className="project-card__meta">
+                  <span>{project.node_count || 0} nodes</span>
+                  <span>{project.has_insights ? 'Insights saved' : 'No insights yet'}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {!loading && projects.length === 0 ? (
+            <div className="empty-state">
+              No projects found. Create one from the dashboard.
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </ProtectedShell>
+  )
+}
+
+function IdeaPage() {
+  const navigate = useNavigate()
+  const loadingMessage = useAppStore((s) => s.loadingMessage)
+  const setProjectName = useAppStore((s) => s.setProjectName)
+  const logout = useAppStore((s) => s.logout)
+
+  const [projectNameInput, setProjectNameInput] = useState('')
+  const [error, setError] = useState('')
+
+  function handleCreateProject() {
+    const projectName = String(projectNameInput || '').trim()
+    if (!projectName) {
+      setError('Project name is required.')
+      return
+    }
+
+    setError('')
+    setProjectName(projectName)
+    navigate('/build')
+  }
+
+  return (
+    <ProtectedShell active="dashboard">
+      <div className="page-wrap">
+      <div className="landing-hero card" style={{ maxWidth: 760, alignItems: 'stretch', textAlign: 'left', margin: 0 }}>
+        <p className="hero-eyebrow">Project Setup</p>
+        <h1 className="hero-title">Create a project</h1>
+        <p className="hero-sub">Start by naming your project. Next, you will move to the Build page to describe it in natural language.</p>
+        <div className="hero-input-wrap" style={{ display: 'grid', gap: 12 }}>
+          <input
+            className="hero-input"
+            value={projectNameInput}
+            onChange={(e) => setProjectNameInput(e.target.value)}
+            placeholder="Project name"
+          />
+          <button className="hero-btn" onClick={handleCreateProject} disabled={Boolean(loadingMessage)}>
+            Continue to Build Page
+          </button>
+        </div>
+        {error ? <p className="hero-error-text">{error}</p> : null}
+      </div>
+      </div>
+    </ProtectedShell>
+  )
+}
+
+function BuildPage() {
+  const navigate = useNavigate()
+  const token = useAppStore((s) => s.token)
+  const project_id = useAppStore((s) => s.project_id)
+  const projectName = useAppStore((s) => s.projectName)
+  const loadingMessage = useAppStore((s) => s.loadingMessage)
+  const setIdea = useAppStore((s) => s.setIdea)
+  const setProjectId = useAppStore((s) => s.setProjectId)
+  const setQuestions = useAppStore((s) => s.setQuestions)
+  const setWorkflow = useAppStore((s) => s.setWorkflow)
+  const setLoadingMessage = useAppStore((s) => s.setLoadingMessage)
+  const [ideaInput, setIdeaInput] = useState('')
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!projectName) {
+      navigate('/')
+    }
+  }, [projectName, navigate])
+
+  async function handleBuildFromNlp() {
+    const idea = String(ideaInput || '').trim()
+    if (!idea) {
+      setError('Describe your project in natural language.')
+      return
+    }
+
+    setError('')
+    setLoadingMessage('Understanding project...')
+    try {
+      const data = await gatherRequirements({ description: idea, project_id, token })
+      const nextQuestions = Array.isArray(data?.questions) ? data.questions : []
+      if (nextQuestions.length === 0) {
+        throw new Error('No follow-up questions returned.')
+      }
+      setIdea(idea)
+      setProjectId(Number(data.project_id || 0) || null)
+      setQuestions(nextQuestions)
+      setWorkflow(null)
+      navigate('/onboarding')
+    } catch (err) {
+      setError(err?.response?.data?.detail || err?.message || 'Failed to generate follow-up questions.')
+    } finally {
+      setLoadingMessage('')
+    }
+  }
+
+  if (!projectName) return null
+
+  return (
+    <ProtectedShell active="projects">
+      <div className="page-wrap">
+      <div className="landing-hero card" style={{ maxWidth: 760, alignItems: 'stretch', textAlign: 'left', margin: 0 }}>
+        <p className="hero-eyebrow">Build Page</p>
+        <h1 className="hero-title">Describe the project in NLP</h1>
+        <p className="hero-sub">Project: {projectName}. Describe goals, users, features, constraints, and data so we can ask better follow-up questions.</p>
+        <div className="hero-input-wrap" style={{ display: 'grid', gap: 12 }}>
+          <textarea
+            className="hero-input"
+            rows={6}
+            value={ideaInput}
+            onChange={(e) => setIdeaInput(e.target.value)}
+            placeholder="Example: Build a mobile marketplace app with buyer/seller accounts, secure checkout, chat, delivery tracking, and admin moderation."
+          />
+          <button className="hero-btn" onClick={handleBuildFromNlp} disabled={Boolean(loadingMessage)}>
+            {loadingMessage || 'Generate Follow-up Questions'}
+          </button>
+        </div>
+        {error ? <p className="hero-error-text">{error}</p> : null}
+      </div>
+      </div>
+    </ProtectedShell>
+  )
+}
+
+function DashboardPage() {
+  const navigate = useNavigate()
+  const [workflowError, setWorkflowError] = useState('')
+
+  const token = useAppStore((s) => s.token)
+  const idea = useAppStore((s) => s.idea)
+  const projectName = useAppStore((s) => s.projectName)
+  const project_id = useAppStore((s) => s.project_id)
+  const workflow = useAppStore((s) => s.workflow)
+  const answers = useAppStore((s) => s.answers)
+  const questions = useAppStore((s) => s.questions)
+  const loadingMessage = useAppStore((s) => s.loadingMessage)
+  const setAnswers = useAppStore((s) => s.setAnswers)
+  const updateWorkflow = useAppStore((s) => s.setWorkflow)
+  const setQuestions = useAppStore((s) => s.setQuestions)
+  const setProjectId = useAppStore((s) => s.setProjectId)
+  const setLoadingMessage = useAppStore((s) => s.setLoadingMessage)
+  const resetFlow = useAppStore((s) => s.resetFlow)
+  const logout = useAppStore((s) => s.logout)
+
+  const normalizedRequirements = useMemo(() => {
+    const workflowRequirements = workflow?.requirements
+    if (workflowRequirements && typeof workflowRequirements === 'object') {
+      if (workflowRequirements.answers && typeof workflowRequirements.answers === 'object') {
+        return workflowRequirements
+      }
+      return { answers: workflowRequirements }
+    }
+
+    if (answers && typeof answers === 'object' && Object.keys(answers).length > 0) {
+      return { answers }
+    }
+
+    return null
+  }, [workflow, answers])
+
+  useEffect(() => {
+    console.log('STEP DATA:', {
+      step: 'dashboard-page-state',
+      workflow,
+      nodes: workflow?.nodes,
+      edges: workflow?.edges,
+      insights: workflow?.insights,
+      requirements: normalizedRequirements,
+      hasNodes: Array.isArray(workflow?.nodes) && workflow.nodes.length > 0,
+      hasEdges: Array.isArray(workflow?.edges) && workflow.edges.length > 0,
+      hasInsights: Boolean(workflow?.insights),
+      hasRequirements: Boolean(normalizedRequirements),
+    })
+  }, [workflow])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function hydrateRequirements() {
+      const hasRequirements = workflow?.requirements && Object.keys(workflow.requirements || {}).length > 0
+      const hasAnswers = answers && Object.keys(answers || {}).length > 0
+      if (hasRequirements || hasAnswers || !project_id) return
+
+      try {
+        const project = await getProject({ project_id, token })
+        if (cancelled) return
+
+        const requirements = project.requirements || {}
+        if (Object.keys(requirements).length > 0) {
+          setAnswers(requirements)
+          updateWorkflow({
+            ...(workflow || {}),
+            requirements: { answers: requirements },
+          })
+        }
+      } catch (err) {
+        console.error('[DashboardPage] failed to hydrate requirements:', err)
+      }
+    }
+
+    hydrateRequirements()
+    return () => {
+      cancelled = true
+    }
+  }, [answers, project_id, token, workflow, setAnswers, updateWorkflow])
+
+  if (!workflow) {
+    return <Navigate to="/" replace />
+  }
+
+  async function onRegenerate() {
+    try {
+      setWorkflowError('')
+      setLoadingMessage('Understanding project...')
+      const data = await gatherRequirements({
+        description: idea,
+        project_id,
+        previous_questions: questions,
+        token,
+      })
+      const nextQuestions = Array.isArray(data?.questions) ? data.questions : []
+      if (nextQuestions.length === 0) {
+        throw new Error('No onboarding questions returned.')
+      }
+      setProjectId(Number(data.project_id || 0) || null)
+      setQuestions(nextQuestions)
+      navigate('/onboarding')
+    } catch (err) {
+      setWorkflowError(err?.response?.data?.detail || err?.message || 'Regeneration failed.')
+    } finally {
+      setLoadingMessage('')
+    }
+  }
+
+  return (
+    <ProtectedShell active="dashboard">
+      <Dashboard
+        workflow={workflow}
+        requirementsData={normalizedRequirements}
+        isWorkflowLoading={Boolean(loadingMessage)}
+        workflowError={workflowError}
+        projectName={projectName || idea || 'My Project'}
+        onBack={() => {
+          resetFlow()
+          navigate('/')
+        }}
+        onRegenerate={onRegenerate}
+        loadingStage={loadingMessage || ''}
+      />
+    </ProtectedShell>
+  )
+}
+
+export default function App() {
+  const token = useAppStore((s) => s.token)
+
+  return (
+    <Routes>
+      <Route path="/login" element={token ? <Navigate to="/" replace /> : <Login />} />
+      <Route path="/signup" element={token ? <Navigate to="/" replace /> : <Signup />} />
+      <Route path="/" element={<RequireAuth><IdeaPage /></RequireAuth>} />
+      <Route path="/projects" element={<RequireAuth><ProjectsPage /></RequireAuth>} />
+      <Route path="/build" element={<RequireAuth><BuildPage /></RequireAuth>} />
+      <Route path="/onboarding" element={<RequireAuth><Onboarding /></RequireAuth>} />
+      <Route
+        path="/dashboard"
+        element={
+          <RequireAuth>
+            <ErrorBoundary>
+              <DashboardPage />
+            </ErrorBoundary>
+          </RequireAuth>
+        }
+      />
+      <Route path="*" element={<Navigate to={token ? '/' : '/login'} replace />} />
+    </Routes>
   )
 }

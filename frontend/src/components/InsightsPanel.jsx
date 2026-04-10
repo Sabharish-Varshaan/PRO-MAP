@@ -21,6 +21,32 @@ function normalizeToList(value) {
   return []
 }
 
+function toLabelMap(nodes) {
+  const map = {}
+  if (!Array.isArray(nodes)) return map
+
+  nodes.forEach((node, index) => {
+    if (!node || typeof node !== 'object') return
+    const id = String(node.id || `n${index + 1}`)
+    const label = String(node?.data?.label || node?.label || id)
+    map[id] = label
+  })
+
+  return map
+}
+
+function mapInsightIdsToLabels(values, labelMap) {
+  if (!Array.isArray(values)) return values
+
+  return values.map((value) => {
+    if (Array.isArray(value)) {
+      return value.map((entry) => labelMap[String(entry)] || String(entry)).join(', ')
+    }
+
+    return labelMap[String(value)] || String(value)
+  })
+}
+
 function InsightCard({ title, content }) {
   const lines = normalizeToList(content)
 
@@ -47,9 +73,20 @@ function InsightCard({ title, content }) {
   )
 }
 
-export default function InsightsPanel({ insights, isLoading = false }) {
+export default function InsightsPanel({ insights, nodes = [], isLoading = false }) {
   const safeInsights = (insights && typeof insights === 'object') ? insights : {}
   const hasInsights = Boolean(insights && typeof insights === 'object')
+  const labelMap = toLabelMap(nodes)
+  const readableCriticalPath = mapInsightIdsToLabels(safeInsights.critical_path, labelMap)
+  const readableBottlenecks = mapInsightIdsToLabels(safeInsights.top_bottlenecks, labelMap)
+  const readableParallelGroups = mapInsightIdsToLabels(safeInsights.parallel_groups, labelMap)
+
+  console.log('STEP DATA:', {
+    step: 'insights-panel-input',
+    insights: safeInsights,
+    nodes,
+    labelMap,
+  })
 
   return (
     <section
@@ -81,11 +118,12 @@ export default function InsightsPanel({ insights, isLoading = false }) {
           opacity: isLoading ? 0.65 : 1,
         }}
       >
-        <InsightCard title="Critical Path Analysis" content={safeInsights.critical_path_analysis} />
-        <InsightCard title="Bottleneck Analysis" content={safeInsights.bottleneck_analysis} />
-        <InsightCard title="Parallel Execution" content={safeInsights.parallel_execution} />
-        <InsightCard title="Execution Strategy" content={safeInsights.execution_strategy} />
-        <InsightCard title="Optimization Suggestions" content={safeInsights.optimization_suggestions} />
+        <InsightCard title="Critical Path" content={readableCriticalPath} />
+        <InsightCard title="Top Bottlenecks" content={readableBottlenecks} />
+        <InsightCard title="Parallel Groups" content={readableParallelGroups} />
+        <InsightCard title="Start Task" content={safeInsights.start_task} />
+        <InsightCard title="End Task" content={safeInsights.end_task} />
+        <InsightCard title="Explanation" content={safeInsights.explanation} />
       </div>
     </section>
   )

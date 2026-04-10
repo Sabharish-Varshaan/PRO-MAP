@@ -5,3 +5,6 @@ pydantic
 openai
 python-dotenv
 networkx
+sqlalchemy
+bcrypt
+python-jose

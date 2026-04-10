@@ -9,26 +9,39 @@ const EDGE_STYLE = {
   markerEnd: { type: 'arrowclosed', color: '#94a3b8' },
 }
 
+const nodeTypes = { task: CustomNode }
+
 export default function WorkflowGraph({ nodes, edges, insights, onNodeClick, isLoading = false }) {
   const [flowInstance, setFlowInstance] = useState(null)
-  const nodeTypes = useMemo(() => ({ task: CustomNode }), [])
   const criticalNodeSet = useMemo(() => new Set(insights?.critical_path || []), [insights])
+  const safeNodesInput = Array.isArray(nodes) ? nodes : []
+  const safeEdgesInput = Array.isArray(edges) ? edges : []
 
-  const safeNodes = useMemo(() => {
+  console.log('GRAPH RECEIVED:', safeNodesInput, safeEdgesInput)
+
+  const layoutedNodes = useMemo(() => {
     if (!Array.isArray(nodes)) return []
 
     return nodes
       .filter((n) => n && typeof n === 'object' && n.id)
-      .map((n) => ({
+      .map((n, index) => ({
         ...n,
         id: String(n.id),
+        data: {
+          ...(n.data || {}),
+          label: n?.data?.label || n?.label || n?.name || String(n.id),
+        },
+        position: {
+          x: (index % 2) * 300,
+          y: index * 120,
+        },
       }))
   }, [nodes])
 
   const safeEdges = useMemo(() => {
     if (!Array.isArray(edges)) return []
 
-    const nodeIds = new Set(safeNodes.map((n) => n.id))
+    const nodeIds = new Set(layoutedNodes.map((n) => n.id))
 
     return edges
       .filter((e) => e && typeof e === 'object' && e.source && e.target)
@@ -52,10 +65,21 @@ export default function WorkflowGraph({ nodes, edges, insights, onNodeClick, isL
         }
       })
       .filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target))
-  }, [edges, safeNodes, criticalNodeSet])
+  }, [edges, layoutedNodes, criticalNodeSet])
 
   useEffect(() => {
-    if (!flowInstance || safeNodes.length === 0) return
+    console.log('STEP DATA:', {
+      step: 'workflow-graph-input',
+      data: { nodes, edges, insights },
+      hasNodes: layoutedNodes.length > 0,
+      hasEdges: safeEdges.length > 0,
+      safeNodes: layoutedNodes,
+      safeEdges,
+    })
+  }, [nodes, edges, insights, layoutedNodes, safeEdges])
+
+  useEffect(() => {
+    if (!flowInstance || layoutedNodes.length === 0) return
     const timer = setTimeout(() => {
       flowInstance.fitView({ padding: 0.2, duration: 350, includeHiddenNodes: true })
       requestAnimationFrame(() => {
@@ -63,10 +87,17 @@ export default function WorkflowGraph({ nodes, edges, insights, onNodeClick, isL
       })
     }, 150)
     return () => clearTimeout(timer)
-  }, [flowInstance, safeNodes, safeEdges])
+  }, [flowInstance, layoutedNodes, safeEdges])
+
+  if (!layoutedNodes.length) {
+    return null
+  }
 
   return (
-    <div className="canvas-flow-wrap">
+    <div
+      className="canvas-flow-wrap"
+      style={{ position: 'relative', inset: 'auto', width: '100%', height: '100%', minHeight: 520 }}
+    >
       {isLoading ? (
         <div className="expl-banner" style={{ marginBottom: 12 }}>
           <p className="expl-label">Workflow Graph</p>
@@ -74,7 +105,7 @@ export default function WorkflowGraph({ nodes, edges, insights, onNodeClick, isL
         </div>
       ) : null}
 
-      {!isLoading && safeNodes.length === 0 ? (
+      {!isLoading && layoutedNodes.length === 0 ? (
         <div className="expl-banner" style={{ marginBottom: 12 }}>
           <p className="expl-label">Workflow Graph</p>
           <p className="expl-text">No graph data available yet.</p>
@@ -82,7 +113,7 @@ export default function WorkflowGraph({ nodes, edges, insights, onNodeClick, isL
       ) : null}
 
       <ReactFlow
-        nodes={safeNodes}
+        nodes={layoutedNodes}
         edges={safeEdges}
         nodeTypes={nodeTypes}
         fitView

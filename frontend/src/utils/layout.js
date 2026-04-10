@@ -4,23 +4,41 @@ const NODE_W = 260
 const NODE_H = 140
 
 export function getLayoutedNodes(nodes, edges) {
+  if (!Array.isArray(nodes) || nodes.length === 0) {
+    return []
+  }
+
+  const safeNodes = nodes
+    .filter((n) => n && typeof n === 'object')
+    .map((n, index) => ({
+      ...n,
+      id: String(n.id || `n${index + 1}`),
+    }))
+
+  const safeEdges = Array.isArray(edges)
+    ? edges.filter((e) => e && e.source && e.target)
+    : []
+
   const g = new dagre.graphlib.Graph()
   g.setDefaultEdgeLabel(() => ({}))
   g.setGraph({ rankdir: 'TB', nodesep: 100, ranksep: 160, marginx: 50, marginy: 50 })
 
-  nodes.forEach((n) => g.setNode(n.id, { width: NODE_W, height: NODE_H }))
-  edges.forEach((e) => { if (e.source && e.target) g.setEdge(e.source, e.target) })
+  safeNodes.forEach((n) => g.setNode(n.id, { width: NODE_W, height: NODE_H }))
+  safeEdges.forEach((e) => g.setEdge(String(e.source), String(e.target)))
 
   dagre.layout(g)
 
-  const positioned = nodes.map((n) => {
+  const positioned = safeNodes.map((n, index) => {
     const pos = g.node(n.id)
+    const fallbackX = index % 2 === 0 ? 0 : 300
+    const fallbackY = index * 120
+
     return {
       ...n,
       type: 'task',
       position: {
-        x: pos ? pos.x - NODE_W / 2 : (n.position?.x || 0),
-        y: pos ? pos.y - NODE_H / 2 : (n.position?.y || 0),
+        x: pos ? pos.x - NODE_W / 2 : fallbackX,
+        y: pos ? pos.y - NODE_H / 2 : fallbackY,
       },
     }
   })

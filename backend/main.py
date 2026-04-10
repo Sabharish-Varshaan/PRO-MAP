@@ -49,7 +49,262 @@ class AnalyzeWorkflowRequest(BaseModel):
     edges: list[dict[str, Any]]
 
 
+class GatherRequirementsRequest(BaseModel):
+    project_idea: str
+
+
+class GenerateWorkflowRequest(BaseModel):
+    requirements: dict[str, Any]
+
+
+class GenerateInsightsRequest(BaseModel):
+    nodes: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
+    order: list[str]
+    parallel_groups: list[list[str]]
+    critical_path: list[str]
+    bottlenecks: list[str]
+
+
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "").strip())
+
+
+def generate_execution_insights(data: dict[str, Any]) -> dict[str, Any]:
+    prompt = f"""
+You are an expert system analyst.
+
+Analyze this workflow graph and generate execution insights.
+
+Workflow data: {json.dumps(data)}
+
+Output ONLY valid JSON in this format:
+
+{{
+  "insights": {{
+    "critical_path_analysis": "...",
+    "bottleneck_analysis": "...",
+    "parallel_execution": "...",
+    "execution_strategy": "...",
+    "optimization_suggestions": "..."
+  }}
+}}
+
+Instructions:
+- Explain critical path importance and delay impact (1-2 lines)
+- Explain bottleneck risks (1-2 lines)
+- Explain parallel execution benefits (1-2 lines)
+- Provide step-by-step execution guidance (1-2 lines)
+- Suggest optimizations like reducing dependencies or parallel running (1-2 lines)
+- Keep concise and actionable
+"""
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a workflow analyst. Output valid JSON only.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.2,
+            max_tokens=800,
+        )
+
+        content = response.choices[0].message.content or ""
+        json_text = _extract_json_block(content)
+        if json_text:
+            parsed = json.loads(json_text)
+            return parsed
+    except Exception as e:
+        print("Insights generation error:", e)
+
+    # Fallback
+    return {
+        "insights": {
+            "critical_path_analysis": "Critical path determines minimum completion time. Delays here extend overall project duration.",
+            "bottleneck_analysis": "Bottlenecks have high dependencies and are risk points for delays.",
+            "parallel_execution": "Parallel groups can run simultaneously to improve efficiency.",
+            "execution_strategy": "Follow topological order, prioritize critical path tasks.",
+            "optimization_suggestions": "Reduce dependencies, run parallel tasks together, simplify workflow."
+        }
+    }
+
+
+def generate_workflow_from_requirements(requirements: dict[str, Any]) -> dict[str, Any]:
+    prompt = f"""
+You are an expert system architect and workflow planner.
+
+Convert these structured requirements into an executable workflow graph.
+
+Input requirements: {json.dumps(requirements)}
+
+Output ONLY valid JSON in this format:
+
+{{
+  "nodes": [
+    {{
+      "id": "n1",
+      "type": "task",
+      "position": {{"x": 0, "y": 0}},
+      "data": {{
+        "label": "...",
+        "description": "...",
+        "priority": "High/Medium/Low",
+        "assigned_role": "Frontend/Backend/Designer/Tester",
+        "source_requirement": "..."
+      }}
+    }}
+  ],
+  "edges": [
+    {{
+      "id": "e1",
+      "source": "n1",
+      "target": "n2"
+    }}
+  ],
+  "order": ["n1", "n2"]
+}}
+
+Instructions:
+- Generate 5-8 tasks total from requirements, user_actions, system_behavior
+- Assign roles: UI/interaction → Frontend, API/logic/data → Backend, UX/design → Designer, validation/testing → Tester
+- Assign priorities based on priority_features: High for critical, Medium for supporting, Low for optional
+- Create logical dependencies (no cycles)
+- Ensure dependency-consistent order
+- Keep tasks meaningful and non-redundant
+"""
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a workflow planner. Output valid JSON only.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.2,
+            max_tokens=1200,
+        )
+
+        content = response.choices[0].message.content or ""
+        json_text = _extract_json_block(content)
+        if json_text:
+            parsed = json.loads(json_text)
+            return parsed
+    except Exception as e:
+        print("Workflow generation error:", e)
+
+    # Fallback
+    return {
+        "nodes": [
+            {
+                "id": "n1",
+                "type": "task",
+                "position": {"x": 0, "y": 0},
+                "data": {
+                    "label": "Define requirements",
+                    "description": "Break project into tasks",
+                    "priority": "High",
+                    "assigned_role": "Backend",
+                    "source_requirement": "requirements"
+                }
+            },
+            {
+                "id": "n2",
+                "type": "task",
+                "position": {"x": 0, "y": 0},
+                "data": {
+                    "label": "Implement backend",
+                    "description": "Build APIs and logic",
+                    "priority": "High",
+                    "assigned_role": "Backend",
+                    "source_requirement": "system_behavior"
+                }
+            }
+        ],
+        "edges": [
+            {
+                "id": "e1",
+                "source": "n1",
+                "target": "n2"
+            }
+        ],
+        "order": ["n1", "n2"]
+    }
+
+
+def gather_requirements(idea: str) -> dict:
+    prompt = f"""
+You are an expert Product Manager and Requirement Engineer.
+
+Convert this project idea into structured, actionable requirements.
+
+First, identify the DOMAIN (e.g., E-commerce, Social media, AI application, Management system).
+
+Then, based on the domain, gather requirements by asking focused questions internally.
+
+Output ONLY valid JSON in this format:
+
+{{
+  "title": "Brief project title",
+  "domain": "Identified domain",
+  "requirements": ["List of main features"],
+  "user_actions": ["List of user actions"],
+  "system_behavior": ["List of system responses"],
+  "data_entities": ["List of data to store/process"],
+  "priority_features": ["List of high-priority features"],
+  "team": {{
+    "size": 3,
+    "roles": ["Frontend", "Backend", "Designer"]
+  }}
+}}
+
+Project idea: {idea}
+"""
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a senior product manager. Output structured requirements only.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.2,
+            max_tokens=1000,
+        )
+
+        content = response.choices[0].message.content or ""
+        json_text = _extract_json_block(content)
+        if json_text:
+            parsed = json.loads(json_text)
+            return parsed
+    except Exception as e:
+        print("Requirements gathering error:", e)
+
+    # Fallback
+    return {
+        "title": "Project",
+        "domain": "General",
+        "requirements": ["Basic features"],
+        "user_actions": ["Perform actions"],
+        "system_behavior": ["Respond accordingly"],
+        "data_entities": ["Data storage"],
+        "priority_features": ["Key features"],
+        "team": {"size": 1, "roles": ["Developer"]}
+    }
 
 
 def _safe_priority(value: str) -> str:
@@ -397,3 +652,26 @@ def build_graph(request: BuildGraphRequest) -> dict[str, Any]:
 def analyze_workflow(request: AnalyzeWorkflowRequest) -> dict[str, Any]:
     insights = _analyze_workflow(request.nodes, request.edges)
     return {"insights": insights}
+
+
+@app.post("/gather-requirements")
+def gather_requirements_endpoint(request: GatherRequirementsRequest) -> dict[str, Any]:
+    return gather_requirements(request.project_idea)
+
+
+@app.post("/generate-workflow")
+def generate_workflow_endpoint(request: GenerateWorkflowRequest) -> dict[str, Any]:
+    return generate_workflow_from_requirements(request.requirements)
+
+
+@app.post("/generate-insights")
+def generate_insights_endpoint(request: GenerateInsightsRequest) -> dict[str, Any]:
+    data = {
+        "nodes": request.nodes,
+        "edges": request.edges,
+        "order": request.order,
+        "parallel_groups": request.parallel_groups,
+        "critical_path": request.critical_path,
+        "bottlenecks": request.bottlenecks
+    }
+    return generate_execution_insights(data)

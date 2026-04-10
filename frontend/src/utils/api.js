@@ -57,10 +57,10 @@ export async function generateTasks({ description, requirements, project_id, tok
   return res.data
 }
 
-export async function buildGraph({ project_id, tasks, token }) {
+export async function buildGraph({ project_id, tasks, dependencies, token }) {
   const res = await api.post(
     '/build-graph',
-    { project_id, tasks },
+    { project_id, tasks, dependencies },
     authConfig(token)
   )
   return res.data

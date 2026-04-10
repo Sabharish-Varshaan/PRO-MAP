@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import AppLayout from '../components/AppLayout'
-import { analyzeWorkflow, buildGraph, generateTasks, submitRequirements } from '../utils/api'
+import { buildGraph, generateTasks, submitRequirements } from '../utils/api'
 import { useAppStore } from '../store/useAppStore'
 
 const EMPTY_INSIGHTS = {
@@ -131,13 +131,16 @@ export default function Onboarding() {
         step: 'generate-tasks',
         project_id: tasksData?.project_id || project_id,
         tasksCount: Array.isArray(tasksData?.tasks) ? tasksData.tasks.length : 0,
+        dependenciesCount: Array.isArray(tasksData?.dependencies) ? tasksData.dependencies.length : 0,
         tasks: tasksData?.tasks,
+        dependencies: tasksData?.dependencies,
       })
 
       setLoadingMessage('Building workflow...')
       const graphData = await buildGraph({
         project_id: Number(tasksData.project_id || project_id),
         tasks: tasksData.tasks,
+        dependencies: tasksData.dependencies,
         token,
       })
       console.log('STEP DATA:', {
@@ -148,19 +151,7 @@ export default function Onboarding() {
         nodes: graphData?.nodes,
         edges: graphData?.edges,
         order: graphData?.order,
-      })
-
-      setLoadingMessage('Analyzing dependencies...')
-      const insightsData = await analyzeWorkflow({
-        project_id: Number(graphData.project_id || project_id),
-        nodes: graphData.nodes,
-        edges: graphData.edges,
-        token,
-      })
-      console.log('STEP DATA:', {
-        step: 'analyze-workflow',
-        project_id: insightsData?.project_id || graphData?.project_id || project_id,
-        insights: insightsData?.insights,
+        insights: graphData?.insights,
       })
 
       const requirementsPayload = {
@@ -173,9 +164,11 @@ export default function Onboarding() {
         order: Array.isArray(graphData.order) ? graphData.order : [],
         insights: {
           ...EMPTY_INSIGHTS,
-          ...((insightsData && typeof insightsData === 'object' && insightsData.insights) ? insightsData.insights : {}),
+          ...((graphData && typeof graphData === 'object' && graphData.insights) ? graphData.insights : {}),
         },
         requirements: requirementsPayload,
+        workflow_quality: graphData?.workflow_quality,
+        graph_structure: graphData?.graph_structure,
       }
       console.log('STEP DATA:', {
         step: 'combine-workflow',

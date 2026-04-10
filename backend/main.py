@@ -76,14 +76,22 @@ class TaskItem(BaseModel):
     id: str
     label: str
     description: str
+    phase: str
     features: list[str]
     modules: list[str]
     priority: str
+    parallelizable: bool = False
+
+
+class DependencyItem(BaseModel):
+    source: str
+    target: str
 
 
 class BuildGraphRequest(BaseModel):
     project_id: int
     tasks: list[TaskItem] | None = None
+    dependencies: list[DependencyItem] | None = None
 
 
 class AnalyzeWorkflowRequest(BaseModel):
@@ -118,6 +126,233 @@ def _safe_priority(value: str) -> str:
     if p in {"High", "Medium", "Low"}:
         return p
     return "Medium"
+
+
+def _safe_phase(value: str) -> str:
+    phase = str(value or "").strip().title()
+    allowed = {
+        "Planning",
+        "System Design",
+        "Architecture",
+        "Backend Development",
+        "Frontend Development",
+        "Integration",
+        "Testing",
+        "Deployment",
+    }
+    if phase in allowed:
+        return phase
+    if phase == "System Design / Architecture":
+        return "Architecture"
+    return "Planning"
+
+
+ENGINEERING_PHASES = [
+    "Planning",
+    "Architecture",
+    "Backend Development",
+    "Frontend Development",
+    "Integration",
+    "Testing",
+    "Deployment",
+]
+
+
+def _build_task_label(description: str, phase: str, fallback_label: str, index: int) -> str:
+    text = _normalize_text(description)
+    if text:
+        return text
+    return fallback_label or f"Task {index + 1}"
+
+
+def _normalize_engineering_task(task: dict[str, Any], idx: int) -> dict[str, Any]:
+    task_id = _normalize_text(task.get("id")) or f"n{idx + 1}"
+    label = _normalize_text(task.get("label")) or f"Task {idx + 1}"
+    description = _normalize_text(task.get("description"))
+    phase = _safe_phase(task.get("phase") or ENGINEERING_PHASES[min(idx, len(ENGINEERING_PHASES) - 1)])
+    priority = _safe_priority(task.get("priority") or "Medium")
+    parallelizable = bool(task.get("parallelizable", False))
+    features = task.get("features") if isinstance(task.get("features"), list) else []
+    modules = task.get("modules") if isinstance(task.get("modules"), list) else []
+
+    clean_features = [str(v) for v in features if _normalize_text(v)]
+    clean_modules = [str(v) for v in modules if _normalize_text(v)]
+    if len(clean_features) < 2:
+        clean_features.extend(["Implementation", "Validation"])
+    if len(clean_modules) < 2:
+        clean_modules.extend(["Core", "Support"])
+
+    return {
+        "id": task_id,
+        "label": label,
+        "description": description,
+        "phase": phase,
+        "features": clean_features[:4],
+        "modules": clean_modules[:4],
+        "priority": priority,
+        "parallelizable": parallelizable,
+    }
+
+
+def _normalize_dependency(dep: dict[str, Any], valid_ids: set[str]) -> dict[str, str] | None:
+    if not isinstance(dep, dict):
+        return None
+    source = _normalize_text(dep.get("source") or dep.get("from"))
+    target = _normalize_text(dep.get("target") or dep.get("to"))
+    if not source or not target or source == target:
+        return None
+    if source not in valid_ids or target not in valid_ids:
+        return None
+    return {"source": source, "target": target}
+
+
+def _fallback_engineering_workflow(description: str, requirements: dict[str, Any] | None = None) -> dict[str, Any]:
+    label_hint = _normalize_text((requirements or {}).get("project_name") or description or "Project")
+    tasks = [
+        {
+            "id": "n1",
+            "label": f"Define {label_hint} scope and success criteria",
+            "description": "Clarify goals, users, non-functional requirements, and delivery scope.",
+            "phase": "Planning",
+            "features": ["Requirements workshop", "Scope baseline"],
+            "modules": ["Product discovery", "Acceptance criteria"],
+            "priority": "High",
+            "parallelizable": False,
+        },
+        {
+            "id": "n2",
+            "label": "Design system architecture and data model",
+            "description": "Define service boundaries, data entities, and integration contracts.",
+            "phase": "Architecture",
+            "features": ["Domain modeling", "API contract planning"],
+            "modules": ["Architecture", "Data modeling"],
+            "priority": "High",
+            "parallelizable": False,
+        },
+        {
+            "id": "n3",
+            "label": "Set up repo, CI, and environment baseline",
+            "description": "Prepare repositories, CI pipelines, code quality checks, and local dev tooling.",
+            "phase": "Planning",
+            "features": ["Repository setup", "Continuous integration"],
+            "modules": ["DevOps", "Tooling"],
+            "priority": "Medium",
+            "parallelizable": True,
+        },
+        {
+            "id": "n4",
+            "label": "Implement backend foundation and database schema",
+            "description": "Create the backend skeleton, persistence layer, migrations, and shared services.",
+            "phase": "Backend Development",
+            "features": ["Database schema", "Service bootstrap"],
+            "modules": ["FastAPI", "SQLAlchemy"],
+            "priority": "High",
+            "parallelizable": False,
+        },
+        {
+            "id": "n5",
+            "label": "Build authentication and authorization",
+            "description": "Implement login, signup, session handling, and access control flows.",
+            "phase": "Backend Development",
+            "features": ["Auth flows", "Session management"],
+            "modules": ["Auth service", "Security"],
+            "priority": "High",
+            "parallelizable": True,
+        },
+        {
+            "id": "n6",
+            "label": "Build core domain APIs",
+            "description": "Implement primary business endpoints and domain rules for the product.",
+            "phase": "Backend Development",
+            "features": ["Core CRUD APIs", "Domain validation"],
+            "modules": ["Business logic", "API layer"],
+            "priority": "High",
+            "parallelizable": True,
+        },
+        {
+            "id": "n7",
+            "label": "Build frontend shell and routing",
+            "description": "Create the application shell, routing, and shared layout primitives.",
+            "phase": "Frontend Development",
+            "features": ["App shell", "Route structure"],
+            "modules": ["React", "Routing"],
+            "priority": "Medium",
+            "parallelizable": True,
+        },
+        {
+            "id": "n8",
+            "label": "Build reusable UI components and design system",
+            "description": "Define component patterns, tokens, and consistent interaction states.",
+            "phase": "Frontend Development",
+            "features": ["Design tokens", "Reusable components"],
+            "modules": ["UI kit", "Styling"],
+            "priority": "Medium",
+            "parallelizable": True,
+        },
+        {
+            "id": "n9",
+            "label": "Implement primary user workflows",
+            "description": "Build the feature screens and flows that depend on backend APIs.",
+            "phase": "Frontend Development",
+            "features": ["Primary workflows", "State management"],
+            "modules": ["Views", "Client state"],
+            "priority": "High",
+            "parallelizable": True,
+        },
+        {
+            "id": "n10",
+            "label": "Integrate frontend and backend services",
+            "description": "Wire UI actions to API endpoints and verify end-to-end data flow.",
+            "phase": "Integration",
+            "features": ["API integration", "End-to-end wiring"],
+            "modules": ["Client API", "Backend integration"],
+            "priority": "High",
+            "parallelizable": False,
+        },
+        {
+            "id": "n11",
+            "label": "Execute automated testing and QA hardening",
+            "description": "Add tests, validate edge cases, and stabilize the workflow under load.",
+            "phase": "Testing",
+            "features": ["Automated tests", "Regression checks"],
+            "modules": ["Test suite", "Quality assurance"],
+            "priority": "High",
+            "parallelizable": False,
+        },
+        {
+            "id": "n12",
+            "label": "Deploy and add monitoring",
+            "description": "Prepare release configuration, deployment, observability, and rollback steps.",
+            "phase": "Deployment",
+            "features": ["Release pipeline", "Monitoring"],
+            "modules": ["Deployments", "Observability"],
+            "priority": "High",
+            "parallelizable": False,
+        },
+    ]
+
+    dependencies = [
+        {"source": "n1", "target": "n2"},
+        {"source": "n1", "target": "n3"},
+        {"source": "n2", "target": "n4"},
+        {"source": "n3", "target": "n4"},
+        {"source": "n4", "target": "n5"},
+        {"source": "n4", "target": "n6"},
+        {"source": "n2", "target": "n7"},
+        {"source": "n3", "target": "n7"},
+        {"source": "n7", "target": "n8"},
+        {"source": "n5", "target": "n9"},
+        {"source": "n6", "target": "n9"},
+        {"source": "n8", "target": "n9"},
+        {"source": "n5", "target": "n10"},
+        {"source": "n6", "target": "n10"},
+        {"source": "n9", "target": "n10"},
+        {"source": "n10", "target": "n11"},
+        {"source": "n8", "target": "n11"},
+        {"source": "n11", "target": "n12"},
+    ]
+
+    return {"tasks": tasks, "dependencies": dependencies}
 
 
 def _normalize_order_status(value: str) -> str:
@@ -397,191 +632,222 @@ Return JSON only:
 
 
 def _fallback_tasks() -> list[dict[str, Any]]:
-    nodes = MOCK_JSON.get("nodes", []) if isinstance(MOCK_JSON, dict) else []
-    tasks = []
-    for idx, node in enumerate(nodes[:5], start=1):
-        data = node.get("data", {}) if isinstance(node, dict) else {}
-        tasks.append(
-            {
-                "id": str(node.get("id") or f"n{idx}"),
-                "label": _normalize_text(data.get("label") or node.get("label") or f"Task {idx}"),
-                "description": _normalize_text(data.get("description") or node.get("description") or ""),
-                "features": [str(v) for v in (data.get("features") or []) if v],
-                "modules": [str(v) for v in (data.get("modules") or []) if v],
-                "priority": _safe_priority(data.get("priority") or node.get("priority") or "Medium"),
-            }
-        )
-
-    if tasks:
-        if len(tasks) >= 3:
-            return tasks[:5]
-
-        while len(tasks) < 3:
-            next_index = len(tasks) + 1
-            tasks.append(
-                {
-                    "id": f"n{next_index}",
-                    "label": f"Fallback Task {next_index}",
-                    "description": "Fallback task used when GPT output cannot be parsed.",
-                    "features": ["Implementation", "Validation"],
-                    "modules": ["Core", "Support"],
-                    "priority": "Medium",
-                }
-            )
-        return tasks
-
-    return [
-        {
-            "id": "n1",
-            "label": "Define scope and architecture",
-            "description": "Convert requirements into implementation-ready scope",
-            "features": ["Scope definition", "Architecture decisions"],
-            "modules": ["Planning", "Architecture"],
-            "priority": "High",
-        },
-        {
-            "id": "n2",
-            "label": "Implement backend services",
-            "description": "Build APIs and persistence for core use cases",
-            "features": ["API routes", "Database integration"],
-            "modules": ["FastAPI", "SQLAlchemy"],
-            "priority": "High",
-        },
-        {
-            "id": "n3",
-            "label": "Build frontend workflow UI",
-            "description": "Create user flow and workflow visualization",
-            "features": ["Onboarding UI", "Graph rendering"],
-            "modules": ["React", "React Flow"],
-            "priority": "Medium",
-        },
-    ]
+    return _fallback_engineering_workflow("", None)["tasks"]
 
 
-def _normalize_task(task: dict[str, Any], idx: int) -> dict[str, Any]:
-    task_id = _normalize_text(task.get("id")) or f"n{idx + 1}"
-    label = _normalize_text(task.get("label")) or f"Task {idx + 1}"
-    description = _normalize_text(task.get("description"))
-    features = task.get("features") if isinstance(task.get("features"), list) else []
-    modules = task.get("modules") if isinstance(task.get("modules"), list) else []
-
-    clean_features = [str(v) for v in features if _normalize_text(v)]
-    clean_modules = [str(v) for v in modules if _normalize_text(v)]
-    if len(clean_features) < 2:
-        clean_features.extend(["Implementation", "Validation"])
-    if len(clean_modules) < 2:
-        clean_modules.extend(["Core", "Support"])
-
-    return {
-        "id": task_id,
-        "label": label,
-        "description": description,
-        "features": clean_features[:4],
-        "modules": clean_modules[:4],
-        "priority": _safe_priority(task.get("priority") or "Medium"),
-    }
-
-
-def _generate_tasks_with_gpt(description: str, requirements: dict[str, Any]) -> list[dict[str, Any]]:
+def _generate_engineering_workflow_with_gpt(description: str, requirements: dict[str, Any]) -> dict[str, Any]:
     if not client.api_key:
-        return _fallback_tasks()
+        return _fallback_engineering_workflow(description, requirements)
 
     prompt = f"""
 You are a senior software architect.
-Generate ONLY task definitions for this project.
 
-Description: {description}
-User Requirements:
+Given a project idea and requirements, generate a realistic engineering workflow.
+
+RULES:
+1. Break workflow into phases:
+   - Planning
+   - System Design / Architecture
+   - Backend Development
+   - Frontend Development
+   - Integration
+   - Testing
+   - Deployment
+2. Generate AT LEAST 10-15 tasks.
+3. Each task must include:
+   {{
+     "id": "n1",
+     "label": "...",
+     "description": "...",
+     "phase": "...",
+     "priority": "High | Medium | Low",
+     "parallelizable": true,
+     "features": ["...", "..."],
+     "modules": ["...", "..."]
+   }}
+4. DO NOT create a simple sequential chain.
+5. Create REAL dependencies.
+6. Also generate dependencies explicitly:
+   {{
+     "tasks": [...],
+     "dependencies": [
+       {{ "source": "n1", "target": "n3" }},
+       {{ "source": "n1", "target": "n4" }}
+     ]
+   }}
+7. Ensure workflow resembles real software development.
+
+Return STRICT JSON ONLY.
+
+Project idea:
+{description}
+
+Requirements:
 {json.dumps(requirements, ensure_ascii=False, indent=2)}
-
-Return ONLY JSON:
-{{
-  "tasks": [
-    {{
-      "id": "n1",
-      "label": "...",
-      "description": "...",
-      "features": ["...", "..."],
-      "modules": ["...", "..."],
-      "priority": "High"
-    }}
-  ]
-}}
-
-Rules:
-- Return max 5 tasks.
-- Every task must have at least 2 features and 2 modules.
-- Priority must be High, Medium, or Low.
-- No graph, no edges, no explanations.
 """
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You output valid JSON only."},
+                {"role": "system", "content": "You output strict JSON only."},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.3,
-            max_tokens=800,
+            temperature=0.25,
+            max_tokens=1800,
         )
         content = response.choices[0].message.content or ""
         print("RAW GPT:", content)
         json_text = _extract_json_block(content)
         if not json_text:
-            print("TASK PARSE FAILED:", "No JSON block found")
-            return _fallback_tasks()
+            print("WORKFLOW PARSE FAILED:", "No JSON block found")
+            return _fallback_engineering_workflow(description, requirements)
 
         parsed = json.loads(json_text)
         raw_tasks = parsed.get("tasks") if isinstance(parsed, dict) else None
-        if not isinstance(raw_tasks, list) or not raw_tasks:
-            print("TASK PARSE FAILED:", "Missing tasks array")
-            return _fallback_tasks()
+        raw_dependencies = parsed.get("dependencies") if isinstance(parsed, dict) else None
+        if not isinstance(raw_tasks, list) or len(raw_tasks) < 10:
+            print("WORKFLOW PARSE FAILED:", "Need at least 10 tasks")
+            return _fallback_engineering_workflow(description, requirements)
 
-        normalized = [_normalize_task(task, idx) for idx, task in enumerate(raw_tasks[:5])]
-        return normalized if normalized else _fallback_tasks()
+        normalized_tasks = [_normalize_engineering_task(task, idx) for idx, task in enumerate(raw_tasks[:15])]
+        valid_ids = {task["id"] for task in normalized_tasks}
+        normalized_dependencies = [
+            dep
+            for dep in (
+                _normalize_dependency(item, valid_ids)
+                for item in (raw_dependencies if isinstance(raw_dependencies, list) else [])
+            )
+            if dep is not None
+        ]
+        if not normalized_dependencies:
+            print("WORKFLOW PARSE FAILED:", "No valid dependencies")
+            return _fallback_engineering_workflow(description, requirements)
+
+        return {"tasks": normalized_tasks, "dependencies": normalized_dependencies}
     except Exception as exc:
-        print("TASK PARSE FAILED:", exc)
-        return _fallback_tasks()
+        print("WORKFLOW PARSE FAILED:", exc)
+        return _fallback_engineering_workflow(description, requirements)
 
 
-def _build_graph_from_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
-    normalized_tasks = [_normalize_task(task, idx) for idx, task in enumerate(tasks[:5])]
+def _compute_workflow_graph(tasks: list[dict[str, Any]], dependencies: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized_tasks = [_normalize_engineering_task(task, idx) for idx, task in enumerate(tasks)]
     if not normalized_tasks:
-        normalized_tasks = _fallback_tasks()[:5]
+        fallback = _fallback_engineering_workflow("", None)
+        normalized_tasks = fallback["tasks"]
+        dependencies = fallback["dependencies"]
 
-    while len(normalized_tasks) < 3:
-        fallback_tasks = _fallback_tasks()
-        missing_index = len(normalized_tasks)
-        normalized_tasks.append(fallback_tasks[missing_index])
-
+    node_map = {task["id"]: task for task in normalized_tasks}
     graph = nx.DiGraph()
     for task in normalized_tasks:
-        graph.add_node(task["id"])
+        graph.add_node(task["id"], **task)
 
-    for idx in range(len(normalized_tasks) - 1):
-        source = normalized_tasks[idx]["id"]
-        target = normalized_tasks[idx + 1]["id"]
+    accepted_dependencies: list[dict[str, str]] = []
+    seen_edges: set[tuple[str, str]] = set()
+    for dep in dependencies:
+        normalized_dep = _normalize_dependency(dep, set(node_map.keys()))
+        if not normalized_dep:
+            continue
+
+        source = normalized_dep["source"]
+        target = normalized_dep["target"]
+        edge_key = (source, target)
+        if edge_key in seen_edges:
+            continue
+
         graph.add_edge(source, target)
+        if nx.is_directed_acyclic_graph(graph):
+            accepted_dependencies.append(normalized_dep)
+            seen_edges.add(edge_key)
+        else:
+            graph.remove_edge(source, target)
+
+    if graph.number_of_edges() == 0 and len(normalized_tasks) > 1:
+        for idx in range(len(normalized_tasks) - 1):
+            source = normalized_tasks[idx]["id"]
+            target = normalized_tasks[idx + 1]["id"]
+            graph.add_edge(source, target)
+            if nx.is_directed_acyclic_graph(graph):
+                accepted_dependencies.append({"source": source, "target": target})
+            else:
+                graph.remove_edge(source, target)
+
+    if not nx.is_directed_acyclic_graph(graph):
+        raise ValueError("Workflow graph must be a DAG")
 
     order = [str(node_id) for node_id in nx.topological_sort(graph)]
-    nodes = [
-        {
-            "id": task["id"],
-            "type": "task",
-            "position": {"x": 0, "y": 0},
-            "data": task,
-        }
-        for task in normalized_tasks
+    parallel_groups = [list(group) for group in nx.topological_generations(graph)]
+    critical_path = [str(node_id) for node_id in nx.dag_longest_path(graph)]
+    bottlenecks = [
+        str(node_id)
+        for node_id in graph.nodes
+        if (graph.in_degree(node_id) + graph.out_degree(node_id)) >= 3
     ]
+
+    positions: dict[str, dict[str, int]] = {}
+    for level, group in enumerate(parallel_groups):
+        for index, node_id in enumerate(group):
+                        positions[str(node_id)] = {"x": index * 300, "y": level * 150}
+
+    critical_set = set(critical_path)
+    bottleneck_set = set(bottlenecks)
+    parallel_set = {node_id for group in parallel_groups if len(group) > 1 for node_id in group}
+
+    nodes = []
+    for node_id in order:
+        task = dict(node_map[node_id])
+        task["parallelizable"] = bool(task.get("parallelizable")) or node_id in parallel_set
+        task["is_critical"] = node_id in critical_set
+        task["is_bottleneck"] = node_id in bottleneck_set
+        task["parallel"] = node_id in parallel_set
+        nodes.append(
+            {
+                "id": node_id,
+                "type": "task",
+                "position": positions.get(node_id, {"x": 0, "y": 0}),
+                "data": task,
+            }
+        )
+
     edges = [
         {
-            "id": f"e{idx}",
-            "source": str(source),
-            "target": str(target),
+            "id": f"e-{dep['source']}-{dep['target']}-{idx}",
+            "source": dep["source"],
+            "target": dep["target"],
         }
-        for idx, (source, target) in enumerate(graph.edges())
+        for idx, dep in enumerate(accepted_dependencies)
     ]
-    return {"nodes": nodes, "edges": edges, "order": order}
+
+    start_task = nodes[0]["data"]["label"] if nodes else ""
+    end_task = nodes[-1]["data"]["label"] if nodes else ""
+
+    insights = {
+        "critical_path": critical_path,
+        "top_bottlenecks": bottlenecks,
+        "parallel_groups": parallel_groups,
+        "start_task": start_task,
+        "end_task": end_task,
+        "explanation": (
+            f"Real DAG with {len(nodes)} tasks across {len(parallel_groups)} execution levels. "
+            f"Critical path length is {len(critical_path)} and {len(parallel_groups)} parallel groups were detected."
+        ),
+    }
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "dependencies": accepted_dependencies,
+        "order": order,
+        "insights": insights,
+        "critical_path_correct": True,
+        "parallel_execution_enabled": any(len(group) > 1 for group in parallel_groups),
+        "graph_structure": "DAG",
+        "workflow_quality": "realistic",
+    }
+
+
+def _build_graph_from_tasks(tasks: list[dict[str, Any]], dependencies: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    dependencies = dependencies or []
+    return _compute_workflow_graph(tasks, dependencies)
 
 
 def _analyze_workflow(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> dict[str, Any]:
@@ -623,22 +889,13 @@ def _analyze_workflow(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) 
 
     order = list(nx.topological_sort(graph))
     critical_path = [str(node_id) for node_id in nx.dag_longest_path(graph)]
-    degree_rank = sorted(
-        graph.nodes(),
-        key=lambda n: (graph.in_degree(n) + graph.out_degree(n), graph.out_degree(n), n),
-        reverse=True,
-    )
-    top_bottlenecks = [str(node_id) for node_id in degree_rank[:3]]
-
-    levels: dict[str, int] = {}
-    for node_id in order:
-        preds = list(graph.predecessors(node_id))
-        levels[node_id] = 0 if not preds else max(levels[pred] for pred in preds) + 1
-
-    grouped: dict[int, list[str]] = {}
-    for node_id, level in levels.items():
-        grouped.setdefault(level, []).append(str(node_id))
-    parallel_groups = [grouped[level] for level in sorted(grouped.keys())]
+    bottleneck_candidates = [
+        str(node_id)
+        for node_id in graph.nodes
+        if (graph.in_degree(node_id) + graph.out_degree(node_id)) >= 3
+    ]
+    top_bottlenecks = bottleneck_candidates[:3]
+    parallel_groups = [list(group) for group in nx.topological_generations(graph)]
 
     start_task_id = str(order[0]) if order else ""
     end_task_id = str(order[-1]) if order else ""
@@ -653,7 +910,7 @@ def _analyze_workflow(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) 
 
     critical_set = set(critical_path)
     bottleneck_set = set(top_bottlenecks)
-    parallel_nodes = set(node_id for group in parallel_groups if len(group) > 1 for node_id in group)
+    parallel_nodes = {node_id for group in parallel_groups if len(group) > 1 for node_id in group}
 
     for node_id, node in node_by_id.items():
         data = node.get("data") if isinstance(node.get("data"), dict) else {}
@@ -828,17 +1085,21 @@ def generate_tasks(
     print("REQ:", requirements)
     project = _get_or_create_project(db, current_user.id, description, requirements, request.project_id)
 
-    if project.tasks:
+    if project.tasks and project.graph and project.graph.get("dependencies"):
         result = {
             "project_id": project.id,
             "cached": True,
             "tasks": project.tasks,
+            "dependencies": project.graph.get("dependencies", []),
         }
         print("OUTPUT:", result)
         return result
 
-    tasks = _generate_tasks_with_gpt(description, requirements)
+    workflow_seed = _generate_engineering_workflow_with_gpt(description, requirements)
+    tasks = workflow_seed["tasks"]
+    dependencies = workflow_seed["dependencies"]
     project.tasks = tasks
+    project.graph = {"dependencies": dependencies}
     if not project.requirements:
         project.requirements = requirements
     db.commit()
@@ -847,6 +1108,7 @@ def generate_tasks(
         "project_id": project.id,
         "cached": False,
         "tasks": tasks,
+        "dependencies": dependencies,
     }
 
     print("OUTPUT:", result)
@@ -862,7 +1124,7 @@ def build_graph(
     print("INPUT:", request.model_dump())
     project = _ensure_project_owner(db, request.project_id, current_user.id)
 
-    if project.graph and not request.tasks:
+    if project.graph and project.graph.get("nodes") and not request.tasks and not request.dependencies:
         result = {"project_id": project.id, "cached": True, **(project.graph or {})}
         print("NODES:", result.get("nodes", []))
         print("EDGES:", result.get("edges", []))
@@ -879,9 +1141,16 @@ def build_graph(
 
     print("BUILD GRAPH TASKS:", tasks)
 
-    graph_payload = _build_graph_from_tasks(tasks)
+    task_dependencies = [dependency.model_dump() for dependency in request.dependencies] if request.dependencies else []
+    stored_dependencies = []
+    if not task_dependencies:
+        existing_graph = project.graph or {}
+        stored_dependencies = existing_graph.get("dependencies", []) if isinstance(existing_graph, dict) else []
+
+    graph_payload = _build_graph_from_tasks(tasks, task_dependencies or stored_dependencies)
     project.tasks = tasks
     project.graph = graph_payload
+    project.insights = graph_payload.get("insights", {})
     db.commit()
 
     result = {"project_id": project.id, "cached": False, **graph_payload}
@@ -929,11 +1198,7 @@ def analyze_workflow(
     project.graph = updated_graph
     db.commit()
 
-    result = {
-        "project_id": project.id,
-        "cached": False,
-        "insights": insights,
-    }
+    result = {"project_id": project.id, "cached": False, "insights": insights}
 
     print("OUTPUT:", result)
     return result

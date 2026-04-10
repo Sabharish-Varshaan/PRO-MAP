@@ -2,6 +2,7 @@ import { Handle, Position } from 'react-flow-renderer'
 
 export default function CustomNode({ data, selected }) {
   const priority = data?.priority || 'Medium'
+  const phase = data?.phase || 'Planning'
   const features = Array.isArray(data?.features) ? data.features.slice(0, 2) : []
   const modules  = Array.isArray(data?.modules)  ? data.modules.slice(0, 2)  : []
 
@@ -12,6 +13,11 @@ export default function CustomNode({ data, selected }) {
       <Handle type="target" position={Position.Top} className="task-node__handle" />
 
       <h3 className="task-node__title">{data?.label}</h3>
+
+      <div className="task-node__phase-row">
+        <span className="task-node__phase">{phase}</span>
+        {data?.parallelizable ? <span className="task-node__phase task-node__phase--parallel">Parallelizable</span> : null}
+      </div>
 
       {(data?.is_critical || data?.is_bottleneck) && (
         <div className="task-node__flags">

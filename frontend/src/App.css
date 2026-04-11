@@ -1638,131 +1638,202 @@ body {
   border-radius: 16px;
   padding: 16px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
-  overflow-x: auto;
 }
 
 .timeline-title {
-  margin: 0 0 12px;
+  margin: 0 0 8px;
   font-family: 'Sora', sans-serif;
   font-size: 16px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--text-1);
 }
 
-.timeline-wrap {
-  padding: 0;
-  border-radius: 12px;
-  background: #fff;
+.timeline-intro {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
-.timeline-header-row {
+.timeline-phase-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 14px 0 16px;
+}
+
+.timeline-phase-summary-card {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff, #fafaf8);
+}
+
+.timeline-phase-summary-card--wide {
+  grid-column: 1 / -1;
+}
+
+.timeline-phase-summary-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.timeline-phase-summary-card__head h4 {
+  margin: 0;
+  font-family: 'Sora', sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+.timeline-phase-summary-card__head span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--blue-bg);
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.timeline-phase-summary-card p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.timeline-gantt-wrap {
+  min-width: 100%;
+  overflow-x: auto;
+}
+
+.gantt-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.gantt-grid {
   display: grid;
   gap: 0;
-  margin-bottom: 0;
-  min-height: 40px;
-  align-items: center;
-  border-bottom: 1px solid #f1f5f9;
+  align-items: stretch;
 }
 
-.timeline-day {
-  font-size: 12px;
-  font-weight: 600;
+.gantt-grid--header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 12px 12px 0 0;
+  overflow: hidden;
+}
+
+.gantt-grid--row {
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.gantt-grid--critical {
+  background: #fffafb;
+}
+
+.gantt-axis-label,
+.gantt-axis-day,
+.gantt-task-label {
+  padding: 10px 12px;
+}
+
+.gantt-axis-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--text-3);
+  border-right: 1px solid var(--border);
+}
+
+.gantt-axis-day {
+  min-width: 42px;
+  border-left: 1px solid var(--border);
+  font-size: 11px;
   color: var(--text-2);
   text-align: center;
-  letter-spacing: .04em;
-  padding: 0 8px;
-}
-
-.timeline-day--label {
-  width: 220px;
-  text-align: left;
-  color: var(--text-2);
-  font-weight: 700;
-}
-
-.timeline-task-row {
-  display: grid;
-  gap: 0;
-  align-items: center;
-  min-height: 68px;
-  border-bottom: 1px solid #f1f5f9;
-}
-
-.timeline-task-row--critical .timeline-label {
-  color: var(--critical);
-  font-weight: 700;
-}
-
-.timeline-label {
-  width: 220px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-2);
-  padding-right: 10px;
-  flex-shrink: 0;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.timeline-bar {
+.gantt-task-label {
+  border-right: 1px solid var(--border);
+}
+
+.gantt-task-label__title {
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+.gantt-task-label__meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.gantt-track {
   position: relative;
-  height: 36px;
-  border-radius: 6px;
+  min-height: 54px;
+  background-image: linear-gradient(to right, rgba(148, 163, 184, 0.12) 1px, transparent 1px);
+  background-size: var(--gantt-day-width, 52px) 100%;
+  overflow: hidden;
+}
+
+.gantt-bar {
+  position: absolute;
+  top: 12px;
+  height: 30px;
+  border-radius: 999px;
   display: flex;
   align-items: center;
-  padding: 0 10px;
-  font-size: 12px;
-  font-weight: 600;
+  padding: 0 12px;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.18);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  cursor: default;
-  transition: background-color .18s ease;
-  box-shadow: none;
-  align-self: center;
-  margin: 0 8px;
 }
 
-.timeline-bar:hover {
-  filter: brightness(1.02);
+.gantt-bar--critical {
+  background: linear-gradient(90deg, #ef4444, #dc2626);
 }
 
-.timeline-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-  align-items: center;
+.gantt-bar--parallel {
+  background: linear-gradient(90deg, #2563eb, #1d4ed8);
+}
+
+.gantt-bar--bottleneck {
+  background: linear-gradient(90deg, #f59e0b, #d97706);
+}
+
+.gantt-bar span {
+  position: relative;
+  z-index: 1;
+}
+
+.timeline-gantt-wrap .timeline-phase-block:last-child {
+  margin-bottom: 0;
+}
+
+.timeline-gantt-wrap .gantt-task-table,
+.timeline-gantt-wrap .gantt-task-list,
+.timeline-gantt-wrap .gantt-task-list-header,
+.timeline-gantt-wrap .gantt-task-list-row,
+.timeline-gantt-wrap .gantt-calendar {
   font-size: 12px;
-  font-weight: 600;
-}
-
-.timeline-legend-item--critical { color: var(--critical); }
-.timeline-legend-item--high { color: var(--high); }
-.timeline-legend-item--medium { color: var(--medium); }
-.timeline-legend-item--parallel { color: var(--parallel); }
-
-.timeline-legend-path {
-  margin: 10px 0 0;
-  font-size: 13px;
-  color: var(--text-2);
-}
-
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 10px;
-  color: var(--text-3);
-}
-
-.legend-swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
 }
 
 /* ─── Execution Steps ────────────────────────────────── */
@@ -1843,11 +1914,8 @@ body {
   border-radius: 50%;
   border: 2px solid rgba(255,255,255,.35);
   border-top-color: #fff;
-  animation: spin .7s linear infinite;
   flex-shrink: 0;
 }
-
-@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ─── Error ──────────────────────────────────────────── */
 .error-bar {

@@ -7,8 +7,6 @@ import WorkflowGraph from './components/WorkflowGraph'
 import RightPanel from './components/RightPanel'
 import RequirementsPanel from './components/RequirementsPanel'
 import InsightsPanel from './components/InsightsPanel'
-import ExecutionSteps from './components/ExecutionSteps'
-import ParallelTasks from './components/ParallelTasks'
 import Timeline from './components/Timeline'
 import ErrorBoundary from './components/ErrorBoundary'
 import AppLayout from './components/AppLayout'
@@ -17,7 +15,6 @@ import Signup from './pages/Signup'
 import Onboarding from './pages/Onboarding'
 import { useAppStore } from './store/useAppStore'
 import { gatherRequirements, getProject, listProjects } from './utils/api'
-import { getLayoutedNodes } from './utils/layout'
 
 /* ── API ─────────────────────────────────────────────── */
 const API_BASE_URL = 'http://127.0.0.1:8000'
@@ -360,57 +357,58 @@ function PBadge({ p }) {
   return <span className={`pbadge pbadge--${p || 'Medium'}`}>{p || 'Medium'}</span>
 }
 
-function TaskList({ nodes = [] }) {
-  const safeNodes = Array.isArray(nodes) ? nodes : []
+function WorkflowList({ data, onNodeClick, selectedNodeId }) {
+  console.log('Rendering List')
+
+  if (!data?.nodes?.length) {
+    return <div>No data</div>
+  }
 
   return (
-    <ul className="simple-task-list">
-      {safeNodes.map((n, index) => {
-        const id = String(n?.id || `n${index + 1}`)
-        const label = n?.data?.label || n?.label || id
-        return <li key={id}>{label}</li>
-      })}
-    </ul>
+    <div className="list-view-wrap">
+      <div className="list-card">
+        <div className="list-card-header">
+          <span className="list-card-title">List view</span>
+          <span className="count-badge">{data.nodes.length} tasks</span>
+          <div className="list-spacer" />
+          <span className="list-hint">Topological order</span>
+        </div>
+        {data.nodes.map((node, index) => {
+          const incoming = (data.edges || []).filter((edge) => edge.target === node.id)
+          const phase = node.data?.phase || 'Planning'
+          const description = node.data?.description || ''
+
+          return (
+            <div
+              key={node.id}
+              className={`list-row${selectedNodeId === node.id ? ' list-row--selected' : ''}`}
+              onClick={() => typeof onNodeClick === 'function' && onNodeClick(node)}
+            >
+              <span className="list-row-num">0{index + 1}</span>
+              <div className="list-row-dot" style={{ background: PRIORITY_DOT[node.data?.priority] || '#f59e0b' }} />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <span className="list-row-name">{node.data?.label}</span>
+                <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
+                  {phase}{description ? ` · ${description}` : ''}
+                </div>
+              </div>
+              <div className="mini-chips">
+                {incoming.map((edge) => (
+                  <span key={edge.id} className="mini-chip mini-chip--blue">
+                    {data.nodeLabelMap?.[edge.source] || edge.source}
+                  </span>
+                ))}
+              </div>
+              <PBadge p={node.data?.priority} />
+              {node.data?.is_critical && <span className="mini-chip mini-chip--red">Critical</span>}
+              {node.data?.is_bottleneck && <span className="mini-chip mini-chip--amber">Bottleneck</span>}
+              {data.parallelNodeSet?.has(node.id) && <span className="mini-chip mini-chip--par">Parallel</span>}
+            </div>
+          )
+        })}
+      </div>
+    </div>
   )
-}
-
-/* ── Gantt row estimates (backend doesn't send hours, so we distribute) ── */
-function buildTimeline(nodes, order, insights) {
-  const byId = {}
-  nodes.forEach((n) => { byId[n.id] = n })
-
-  const orderedIds = (Array.isArray(order) ? order : [])
-    .map((id) => String(id))
-    .filter((id) => byId[id])
-
-  const timelineIds = orderedIds.length > 0 ? orderedIds : nodes.map((n) => n.id)
-  const totalSteps = Math.max(timelineIds.length, 1)
-  const totalDays = Math.max(totalSteps, 5)
-  const criticalSet = new Set(insights?.critical_path || [])
-  const bottleneckSet = new Set(insights?.top_bottlenecks || [])
-  const parallelSet = new Set(
-    (insights?.parallel_groups || [])
-      .filter((group) => group.length > 1)
-      .flat()
-      .map((id) => String(id)),
-  )
-
-  return timelineIds.map((id, index) => {
-    const start = index
-    const duration = 1
-    return {
-      id,
-      label: byId[id]?.data?.label || id,
-      priority: byId[id]?.data?.priority,
-      parallel: parallelSet.has(id),
-      isCritical: criticalSet.has(id),
-      isBottleneck: bottleneckSet.has(id),
-      start,
-      duration,
-      step: index + 1,
-      totalDays,
-    }
-  })
 }
 
 /* ════════════════════════════════════════════════════════
@@ -517,11 +515,13 @@ function Landing({ onGenerate, progressText }) {
    ════════════════════════════════════════════════════════ */
 function Dashboard({ workflow, requirementsData, isWorkflowLoading, workflowError, projectName, onBack, onRegenerate, loadingStage }) {
   const [view, setView] = useState('graph')
+  const [graphMode, setGraphMode] = useState('linear')
   const [selectedNode, setSelectedNode] = useState(null)
   const [activeTab, setActiveTab]     = useState('analysis')
   const [isLoading, setIsLoading]     = useState(false)
 
   useEffect(() => {
+    console.log('ACTIVE VIEW:', view)
     console.log('WORKFLOW STATE:', workflow)
     console.log('STEP DATA:', {
       step: 'dashboard-received-workflow',
@@ -531,10 +531,10 @@ function Dashboard({ workflow, requirementsData, isWorkflowLoading, workflowErro
       insights: workflow?.insights,
       requirements: workflow?.requirements,
     })
-  }, [workflow])
+  }, [workflow, view])
 
-  const hasWorkflow = Boolean(workflow && Array.isArray(workflow.nodes))
-  const { rawNodes, edges, order, explanation, insights } = useMemo(() => {
+  const hasWorkflow = Boolean(workflow && Array.isArray(workflow.nodes) && workflow.nodes.length > 0)
+  const { rawNodes, edges, order, explanation, insights, requirements } = useMemo(() => {
     if (!hasWorkflow) {
       return {
         rawNodes: [],
@@ -542,6 +542,7 @@ function Dashboard({ workflow, requirementsData, isWorkflowLoading, workflowErro
         order: [],
         explanation: '',
         insights: EMPTY_INSIGHTS,
+        requirements: requirementsData || {},
       }
     }
 
@@ -549,7 +550,11 @@ function Dashboard({ workflow, requirementsData, isWorkflowLoading, workflowErro
       ? workflow.nodes.map((node, index) => ({
           ...node,
           id: String(node?.id || `n${index + 1}`),
-          position: node?.position || { x: 0, y: 0 },
+          data: {
+            ...(node?.data || {}),
+            label: node?.data?.label || node?.label || node?.name || `Task ${index + 1}`,
+            phase: node?.data?.phase || node?.phase || 'Planning',
+          },
         }))
       : []
 
@@ -559,12 +564,25 @@ function Dashboard({ workflow, requirementsData, isWorkflowLoading, workflowErro
       order: Array.isArray(workflow.order) ? workflow.order : [],
       explanation: workflow.explanation || '',
       insights: workflow.insights || EMPTY_INSIGHTS,
+      requirements: workflow.requirements || requirementsData || {},
     }
-  }, [hasWorkflow, workflow])
+  }, [hasWorkflow, workflow, requirementsData])
 
   const safeInsights = useMemo(() => insights || EMPTY_INSIGHTS, [insights])
+  const graphData = useMemo(() => {
+    if (!hasWorkflow) return null
 
-  const nodes = useMemo(() => getLayoutedNodes(rawNodes, edges), [rawNodes, edges])
+    return {
+      nodes: rawNodes,
+      edges,
+      order,
+      insights: safeInsights,
+      requirements: requirements || {},
+    }
+  }, [hasWorkflow, rawNodes, edges, order, safeInsights, requirements])
+  const normalizedRequirements = graphData?.requirements || {}
+
+  const nodes = rawNodes
 
   const nodeLabelMap = useMemo(() => {
     const m = {}; nodes.forEach((n) => { m[n.id] = n.data?.label || n.id }); return m
@@ -581,10 +599,9 @@ function Dashboard({ workflow, requirementsData, isWorkflowLoading, workflowErro
   const parallelCount = parallelNodeSet.size
   const blockedCount = bottleneckSet.size
 
-  const timelineRows = useMemo(() => buildTimeline(nodes, order, safeInsights), [nodes, order, safeInsights])
-  const timelineDayCount = Math.max(timelineRows[0]?.totalDays || 0, 5)
   const criticalPathLabels = (safeInsights.critical_path || []).map((id) => nodeLabelMap[id] || id)
   const selectedNodeId = selectedNode?.id || null
+  const activeGraphData = graphData
 
   const flowNodes = useMemo(
     () =>
@@ -650,6 +667,67 @@ function Dashboard({ workflow, requirementsData, isWorkflowLoading, workflowErro
   }
 
   if (!hasWorkflow) return <div>No graph data</div>
+
+  if (!activeGraphData) {
+    return <div>Loading...</div>
+  }
+
+  const viewContent = (
+    <div className="dashboard-view-shell" key={view}>
+      {view === 'graph' && (
+        <div className="canvas-area canvas-area--spaced">
+          <div className="dashboard-section-wrap" style={{ padding: '12px 16px 0' }}>
+            <div className="view-tabs" style={{ display: 'inline-flex' }}>
+              {['linear', 'dag'].map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={`view-tab${graphMode === mode ? ' active' : ''}`}
+                  onClick={() => setGraphMode(mode)}
+                >
+                  {mode === 'linear' ? 'Linear Mode' : 'DAG Mode'}
+                </button>
+              ))}
+            </div>
+            <p className="timeline-intro" style={{ marginTop: 8 }}>
+              {graphMode === 'linear'
+                ? 'Clean storytelling view for demos. Tasks are shown in a simple top-to-bottom flow.'
+                : 'Advanced DAG view for dependency analysis. If a DAG cannot be drawn cleanly, the view falls back to linear.'}
+            </p>
+          </div>
+          <div className="canvas-grid" />
+          <WorkflowGraph
+            nodes={graphNodes}
+            edges={graphEdges}
+            insights={safeInsights}
+            isLoading={isWorkflowLoading}
+            mode={graphMode}
+            onNodeClick={(_, n) => {
+              setSelectedNode(n)
+            }}
+          />
+        </div>
+      )}
+
+      {view === 'list' && (
+        <WorkflowList
+          data={{
+            ...activeGraphData,
+            nodeLabelMap,
+            parallelNodeSet,
+          }}
+          selectedNodeId={selectedNodeId}
+          onNodeClick={(node) => setSelectedNode(node)}
+        />
+      )}
+
+      {view === 'timeline' && (
+        <div className="dashboard-section-wrap list-view-wrap">
+          <Timeline nodes={graphNodes} order={executionOrder} insights={safeInsights} edges={graphEdges} />
+        </div>
+      )}
+    </div>
+  )
 
   return (
     <div className="dashboard app">
@@ -751,93 +829,7 @@ function Dashboard({ workflow, requirementsData, isWorkflowLoading, workflowErro
             </div>
           </div>
 
-          {/* ── GRAPH VIEW ── */}
-          {view === 'graph' && workflow?.nodes?.length > 0 && (
-            <div className="canvas-area canvas-area--spaced">
-              <div className="canvas-grid" />
-              <WorkflowGraph
-                nodes={graphNodes}
-                edges={graphEdges}
-                insights={safeInsights}
-                isLoading={isWorkflowLoading}
-                onNodeClick={(_, n) => {
-                  setSelectedNode(n)
-                }}
-              />
-            </div>
-          )}
-
-          {/* ── LIST VIEW ── */}
-          {view === 'list' && workflow?.nodes?.length > 0 && (
-            <div className="list-view-wrap">
-              <div className="list-card">
-                <div className="list-card-header">
-                  <span className="list-card-title">List view</span>
-                  <span className="count-badge">{nodes.length} tasks</span>
-                  <div className="list-spacer" />
-                  <span className="list-hint">Topological order</span>
-                </div>
-                {nodes.length > 0 ? nodes.map((node, i) => {
-                  const incoming = edges.filter((e) => e.target === node.id)
-                  return (
-                    <div key={node.id} className="list-row" onClick={() => setSelectedNode(node)}>
-                      <span className="list-row-num">0{i + 1}</span>
-                      <div className="list-row-dot" style={{ background: PRIORITY_DOT[node.data?.priority] || '#f59e0b' }} />
-                      <span className="list-row-name">{node.data?.label}</span>
-                      <div className="mini-chips">
-                        {incoming.map((e) => (
-                          <span key={e.id} className="mini-chip mini-chip--blue">{nodeLabelMap[e.source]}</span>
-                        ))}
-                      </div>
-                      <PBadge p={node.data?.priority} />
-                      {node.data?.is_critical && <span className="mini-chip mini-chip--red">🔴 Critical</span>}
-                      {node.data?.is_bottleneck && <span className="mini-chip mini-chip--amber">⚠ Bottleneck</span>}
-                      {parallelNodeSet.has(node.id) && <span className="mini-chip mini-chip--par">‖ Parallel</span>}
-                    </div>
-                  )
-                }) : <TaskList nodes={graphNodes} />}
-              </div>
-
-              <div className="list-card list-card--timeline">
-                <div className="list-card-header">
-                  <span className="list-card-title">Timeline view</span>
-                  <span className="count-badge count-badge--timeline">
-                    {timelineRows.length} steps
-                  </span>
-                  <div className="list-spacer" />
-                  <span className="list-hint">Critical path: {criticalPathLabels.join(' → ') || '—'}</span>
-                </div>
-                <Timeline
-                  timelineRows={timelineRows}
-                  timelineDayCount={timelineDayCount}
-                  criticalPathLabels={criticalPathLabels}
-                />
-              </div>
-
-              <div className="steps-wrap steps-wrap--tight">
-                <ExecutionSteps
-                  order={executionOrder}
-                  nodeLabelMap={executionNodeLabelMap}
-                  isLoading={isWorkflowLoading}
-                />
-              </div>
-
-              <div className="steps-wrap steps-wrap--tight">
-                <ParallelTasks
-                  parallelGroups={parallelGroups}
-                  nodeLabelMap={executionNodeLabelMap}
-                  isLoading={isWorkflowLoading}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* ── TIMELINE VIEW ── */}
-          {view === 'timeline' && workflow?.nodes?.length > 0 && (
-            <div className="dashboard-section-wrap list-view-wrap">
-              <Timeline nodes={graphNodes} order={executionOrder} />
-            </div>
-          )}
+          {viewContent}
 
           {!workflow?.nodes?.length && (
             <div className="dashboard-section-wrap">
@@ -855,7 +847,7 @@ function Dashboard({ workflow, requirementsData, isWorkflowLoading, workflowErro
           )}
 
           <div className="dashboard-section-wrap">
-            <RequirementsPanel requirementsData={requirementsData} isLoading={!requirementsData && isWorkflowLoading} />
+            <RequirementsPanel requirementsData={normalizedRequirements} isLoading={!normalizedRequirements && isWorkflowLoading} />
           </div>
 
           <div className="dashboard-section-wrap">
@@ -952,7 +944,7 @@ function ProtectedShell({ children, active = 'dashboard' }) {
       {[
         { key: 'dashboard', label: 'Dashboard', to: '/' },
         { key: 'projects', label: 'Projects', to: '/projects' },
-        { key: 'settings', label: 'Settings', to: '/dashboard' },
+        { key: 'settings', label: 'Settings', to: '/settings' },
       ].map((item) => (
         <div
           key={item.key}
@@ -1002,6 +994,54 @@ function ProtectedShell({ children, active = 'dashboard' }) {
     <AppLayout sidebar={sidebar} topbar={topbar} className="protected-shell">
       {children}
     </AppLayout>
+  )
+}
+
+function SettingsPage() {
+  const navigate = useNavigate()
+  const projectName = useAppStore((s) => s.projectName)
+  const idea = useAppStore((s) => s.idea)
+  const user = useAppStore((s) => s.user)
+
+  return (
+    <ProtectedShell active="settings">
+      <div className="page-wrap">
+        <div className="card onboarding-card" style={{ maxWidth: 760, margin: '0 auto' }}>
+          <p className="section-kicker">Settings</p>
+          <h1 className="section-title">Workspace settings</h1>
+          <p className="section-subtitle">
+            This page is for account and workspace preferences only. The current project graph stays on the Dashboard.
+          </p>
+
+          <div className="settings-grid" style={{ display: 'grid', gap: 12, marginTop: 20 }}>
+            <div className="settings-card" style={{ padding: 16, border: '1px solid var(--border)', borderRadius: 14, background: 'var(--surface-2)' }}>
+              <strong>Account</strong>
+              <div style={{ marginTop: 8, color: 'var(--text-2)', fontSize: 13 }}>
+                Signed in as {user?.email || 'anonymous user'}
+              </div>
+            </div>
+            <div className="settings-card" style={{ padding: 16, border: '1px solid var(--border)', borderRadius: 14, background: 'var(--surface-2)' }}>
+              <strong>Active project</strong>
+              <div style={{ marginTop: 8, color: 'var(--text-2)', fontSize: 13 }}>
+                {projectName || 'No active project'}
+              </div>
+            </div>
+            <div className="settings-card" style={{ padding: 16, border: '1px solid var(--border)', borderRadius: 14, background: 'var(--surface-2)' }}>
+              <strong>Idea summary</strong>
+              <div style={{ marginTop: 8, color: 'var(--text-2)', fontSize: 13 }}>
+                {idea || 'No project idea saved yet.'}
+              </div>
+            </div>
+          </div>
+
+          <div className="center-actions" style={{ marginTop: 20 }}>
+            <button className="secondary-button" onClick={() => navigate('/dashboard')}>
+              Go to Dashboard
+            </button>
+          </div>
+        </div>
+      </div>
+    </ProtectedShell>
   )
 }
 
@@ -1396,6 +1436,7 @@ export default function App() {
       <Route path="/signup" element={token ? <Navigate to="/" replace /> : <Signup />} />
       <Route path="/" element={<RequireAuth><IdeaPage /></RequireAuth>} />
       <Route path="/projects" element={<RequireAuth><ProjectsPage /></RequireAuth>} />
+      <Route path="/settings" element={<RequireAuth><SettingsPage /></RequireAuth>} />
       <Route path="/build" element={<RequireAuth><BuildPage /></RequireAuth>} />
       <Route path="/onboarding" element={<RequireAuth><Onboarding /></RequireAuth>} />
       <Route
